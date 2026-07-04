@@ -19,6 +19,8 @@ const dataSourcesRouter = require('./modules/data-sources/data-sources.routes');
 const crawlJobsRouter = require('./modules/crawl-jobs/crawl-jobs.routes');
 const crawlLogsRouter = require('./modules/crawl-logs/crawl-logs.routes');
 const dataQualityRouter = require('./modules/data-quality/data-quality.routes');
+const alertsRouter = require('./modules/alerts/alert.routes');
+const mockDataRouter = require('./modules/mock-data/mock-data.routes');
 const { error } = require('./common/utils/response.util');
 
 const swaggerUi = require('swagger-ui-express');
@@ -91,6 +93,8 @@ app.use('/api/staff/data-sources', dataSourcesRouter);
 app.use('/api/staff/crawl-jobs', crawlJobsRouter);
 app.use('/api/staff/crawl-logs', crawlLogsRouter);
 app.use('/api/staff/data-quality', dataQualityRouter);
+app.use('/api/staff/mock-data', mockDataRouter);
+app.use('/api/alerts', alertsRouter);
 
 // Health check endpoint
 app.get('/', (req, res) => {

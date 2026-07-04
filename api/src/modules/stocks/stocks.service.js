@@ -1,6 +1,8 @@
 const stocksRepository = require('./stocks.repository');
 const DimMarket = require('../../database/models/dim-market.model');
 const DimStock = require('../../database/models/dim-stock.model');
+const mockDataService = require('../../services/mock-data.service');
+const env = require('../../config/env.config');
 
 const RANGE_TO_DAYS = {
   '7d': 7,
@@ -392,6 +394,68 @@ const getStockDetail = async (symbol) => {
     throw error;
   }
 
+  // DEV: intercept with mock data if a session is active
+  if (env.NODE_ENV === 'development') {
+    const session = mockDataService.getActiveSession(symbol);
+    if (session) {
+      const tick = session.nextTick();
+      if (tick) {
+        const alertsService = require('../alerts/alert.service');
+        const alertChecker = require('../../scheduler/alert-checker.scheduler');
+
+        // Check alert if this tick crosses threshold and alert not yet fired
+        let alertTriggered = false;
+        let alertStatus = null;
+        if (tick._crossesThreshold && !session.alertFired) {
+          try {
+            await alertChecker.checkAlertsForStock(stock._id, {
+              notifyEmail: session.notifyEmail,
+              mockPrice: { close_price: tick.close_price, volume: tick.volume },
+            });
+            mockDataService.markAlertFired(symbol);
+            alertTriggered = true;
+            alertStatus = 'TRIGGERED';
+          } catch (err) {
+            console.error('[MockData] Alert check error:', err.message);
+          }
+        }
+
+        return {
+          id: stock._id.toString(),
+          symbol: stock.symbol,
+          company_name: stock.company_name,
+          market_code: stock.market_id ? stock.market_id.code : '',
+          industry: normalizeIndustry(stock),
+          status: stock.status,
+          listed_date: stock.listed_date || null,
+          latest_price: {
+            time_id: tick.time_id,
+            open_price: tick.open_price,
+            high_price: tick.high_price,
+            low_price: tick.low_price,
+            close_price: tick.close_price,
+            volume: tick.volume,
+            price_change: tick.price_change || 0,
+            price_change_percent: tick.price_change_percent || 0,
+            market_cap: null,
+          },
+          latestMarket: {
+            close_price: tick.close_price,
+            volume: tick.volume,
+            time_id: tick.time_id,
+            crawled_at: tick.crawled_at,
+          },
+          _mock: true,
+          _cursor: tick._cursor,
+          _remaining: tick._remaining,
+          _done: tick._done,
+          alert_triggered: alertTriggered,
+          alert_status: alertStatus,
+        };
+      }
+    }
+  }
+
   const supplemental = await buildAnalysisDataForStock(stock, {
     quarters: 6,
     chartRange: '3m',
@@ -446,6 +510,21 @@ const getStockChart = async (symbol, range = '1m') => {
     const error = new Error('Stock symbol not found');
     error.statusCode = 404;
     throw error;
+  }
+
+  // DEV: intercept with mock data if a session is active
+  if (env.NODE_ENV === 'development') {
+    const session = mockDataService.getActiveSession(symbol);
+    if (session) {
+      return session.getEmittedTicks().map(t => ({
+        time: formatTimeIdToDateString(t.time_id),
+        open: t.open_price,
+        high: t.high_price,
+        low: t.low_price,
+        close: t.close_price,
+        volume: t.volume
+      }));
+    }
   }
 
   const limitNum = getRangeLimit(range);

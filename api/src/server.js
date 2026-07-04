@@ -4,6 +4,7 @@ const env = require('./config/env.config');
 const connectDB = require('./config/database.config');
 const seedRolesAndUsers = require('./database/seeds/seed-roles');
 const seedDataSources = require('./database/seeds/seed-data-sources');
+const { startAllSchedulers } = require('./scheduler');
 
 const startServer = async () => {
   try {
@@ -18,7 +19,11 @@ const startServer = async () => {
     console.log('[Server] Verifying default data sources...');
     await seedDataSources();
 
-    // 3. Start Listening
+    // 3. Start Schedulers (alert checker, etc.)
+    console.log('[Server] Starting background schedulers...');
+    startAllSchedulers();
+
+    // 4. Start Listening
     const server = app.listen(appConfig.port, () => {
       console.log(`[Server] API server running on port ${appConfig.port} in [${appConfig.env}] mode`);
       if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {

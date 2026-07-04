@@ -3,7 +3,7 @@ const dotenv = require('dotenv');
 
 // Load env files
 // Check services/.env (which is 1 level above api: services/api/src/config/../../.env)
-dotenv.config({ path: path.resolve(__dirname, '../../../.env'), override: true });
+dotenv.config({ path: path.resolve(__dirname, '../../.env'), override: true });
 // Fallback to standard dotenv load
 dotenv.config({ override: true });
 
@@ -48,7 +48,14 @@ const env = {
   PAYOS_CHECKSUM_KEY: trimStr(process.env.PAYOS_CHECKSUM_KEY, ''),
   PAYOS_RETURN_URL: trimStr(process.env.PAYOS_RETURN_URL, ''),
   PAYOS_CANCEL_URL: trimStr(process.env.PAYOS_CANCEL_URL, ''),
-  PAYOS_PRO_PRICE: parseInt(process.env.PAYOS_PRO_PRICE || '50000', 10)
+  PAYOS_PRO_PRICE: parseInt(process.env.PAYOS_PRO_PRICE || '50000', 10),
+
+  // Email (SMTP)
+  SMTP_HOST: trimStr(process.env.SMTP_HOST, ''),
+  SMTP_PORT: parseInt(process.env.SMTP_PORT || '587', 10),
+  SMTP_USER: trimStr(process.env.SMTP_USER, ''),
+  SMTP_PASS: trimStr(process.env.SMTP_PASS, ''),
+  EMAIL_FROM: trimStr(process.env.EMAIL_FROM, 'noreply@aistocktrend.com')
 };
 
 

@@ -4,10 +4,14 @@
 
 const PLAN_LIMITS = {
     FREE: {
-        max_watchlist_items: 5
+        max_watchlist_items: 5,
+        max_alert_stocks: 2,
+        max_alerts_per_stock: 2
     },
     PRO: {
-        max_watchlist_items: 50
+        max_watchlist_items: 50,
+        max_alert_stocks: 50,
+        max_alerts_per_stock: 10
     }
 };
 
