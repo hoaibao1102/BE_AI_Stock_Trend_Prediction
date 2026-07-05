@@ -1,5 +1,3 @@
-const { error } = require('../utils/response.util');
-
 /**
  * Global unhandled error handling middleware
  */
@@ -8,11 +6,24 @@ const errorMiddleware = (err, req, res, next) => {
 
   const statusCode = err.statusCode || 500;
   const message = err.message || 'Internal Server Error';
+  const payload = {
+    success: false,
+    message
+  };
 
-  // Include stack details in development mode
-  const errors = process.env.NODE_ENV === 'development' ? err.stack : null;
+  if (err.code) {
+    payload.code = err.code;
+  }
 
-  return error(res, message, errors, statusCode);
+  if (err.details) {
+    payload.details = err.details;
+  }
+
+  if (err.errors) {
+    payload.errors = err.errors;
+  }
+
+  return res.status(statusCode).json(payload);
 };
 
 module.exports = errorMiddleware;

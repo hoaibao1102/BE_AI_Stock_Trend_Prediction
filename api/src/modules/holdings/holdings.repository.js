@@ -1,0 +1,135 @@
+const mongoose = require('mongoose');
+const DimStock = require('../../database/models/dim-stock.model');
+const UserStockHolding = require('../../database/models/user-stock-holding.model');
+const FactMarketPrice = require('../../database/models/fact-market-price.model');
+
+const populateStock = {
+  path: 'stock_id',
+  select: '_id symbol company_name market_id status',
+  populate: {
+    path: 'market_id',
+    select: 'code name',
+    options: { lean: true }
+  },
+  options: { lean: true }
+};
+
+const buildHoldingFilter = (userId, status) => {
+  const filter = { user_id: userId };
+  if (status && status !== 'ALL') {
+    filter.status = status;
+  }
+  return filter;
+};
+
+const findStockBySymbol = async (symbol) => {
+  return DimStock.findOne({ symbol })
+    .select('_id symbol company_name status market_id industry_id')
+    .populate({
+      path: 'market_id',
+      select: 'code name',
+      options: { lean: true }
+    })
+    .lean();
+};
+
+const findHoldingsByUser = async (userId, { status = 'ACTIVE', page = 1, limit = 20 } = {}) => {
+  const skip = (page - 1) * limit;
+  const filter = buildHoldingFilter(userId, status);
+
+  const [items, total] = await Promise.all([
+    UserStockHolding.find(filter)
+      .populate(populateStock)
+      .sort({ updated_at: -1, created_at: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    UserStockHolding.countDocuments(filter)
+  ]);
+
+  return { items, total };
+};
+
+const findHoldingByUserAndStock = async (
+  userId,
+  stockId,
+  { includeRemoved = false, session = null, lean = false, populate = false } = {}
+) => {
+  const filter = {
+    user_id: userId,
+    stock_id: stockId
+  };
+
+  if (!includeRemoved) {
+    filter.status = 'ACTIVE';
+  }
+
+  let query = UserStockHolding.findOne(filter);
+  if (populate) {
+    query = query.populate(populateStock);
+  }
+  if (session) {
+    query = query.session(session);
+  }
+  if (lean) {
+    query = query.lean();
+  }
+
+  return query;
+};
+
+const createHolding = async (payload, session = null) => {
+  const options = session ? { session } : {};
+  const [holding] = await UserStockHolding.create([payload], options);
+  return holding;
+};
+
+const saveDocument = async (document, session = null) => {
+  return document.save(session ? { session } : undefined);
+};
+
+const findLatestPriceByStockId = async (stockId) => {
+  return FactMarketPrice.findOne({ stock_id: stockId })
+    .sort({ time_id: -1, created_at: -1 })
+    .lean();
+};
+
+const findLatestPricesByStockIds = async (stockIds = []) => {
+  if (!stockIds.length) return [];
+
+  return FactMarketPrice.aggregate([
+    {
+      $match: {
+        stock_id: { $in: stockIds }
+      }
+    },
+    {
+      $sort: {
+        stock_id: 1,
+        time_id: -1,
+        created_at: -1
+      }
+    },
+    {
+      $group: {
+        _id: '$stock_id',
+        close_price: { $first: '$close_price' },
+        time_id: { $first: '$time_id' },
+        created_at: { $first: '$created_at' }
+      }
+    }
+  ]);
+};
+
+const startSession = async () => mongoose.startSession();
+
+module.exports = {
+  findStockBySymbol,
+  findHoldingsByUser,
+  findHoldingByUserAndStock,
+  createHolding,
+  saveDocument,
+  findLatestPriceByStockId,
+  findLatestPricesByStockIds,
+  startSession
+};
