@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     ai_report_history_dir: str = Field(default="storage/ai_reports", alias="AI_REPORT_HISTORY_DIR")
     ai_report_history_save_failure_policy: str = Field(default="non_blocking", alias="AI_REPORT_HISTORY_SAVE_FAILURE_POLICY")
 
+    report_compare_score_delta_threshold: float = Field(default=3.0, alias="REPORT_COMPARE_SCORE_DELTA_THRESHOLD")
+    report_compare_risk_delta_threshold: float = Field(default=5.0, alias="REPORT_COMPARE_RISK_DELTA_THRESHOLD")
     report_output_dir: str = Field(default="reports", alias="REPORT_OUTPUT_DIR")
     # REPORT_RENDER_* are legacy aliases kept for older deployments; REPORT_WRITE_*
     # are the preferred names because the flag controls file writes.

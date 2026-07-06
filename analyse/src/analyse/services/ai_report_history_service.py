@@ -21,7 +21,7 @@ from analyse.repositories.ai_report_history_repository import (
     create_ai_report_history_repository,
 )
 from analyse.schemas.report import AnalyseOneReportRequest
-from analyse.schemas.report_history import ReportHistoryDetailData, ReportHistoryFilters, ReportHistoryListData, ReportHistoryListItem
+from analyse.schemas.report_history import ReportHistoryDetailData, ReportHistoryFilters, ReportHistoryListData, ReportHistoryListItem, ReportHistoryCompareData,ReportHistoryCompareItem
 from analyse.services.user_identity_service import CurrentUserIdentity
 from analyse.utils.symbol_utils import normalize_symbol
 
@@ -55,6 +55,10 @@ class AiReportHistoryNotFoundError(AiReportHistoryServiceError):
 
     code = "HISTORY_NOT_FOUND"
 
+class AiReportHistoryCompareInsufficientDataError(AiReportHistoryServiceError):
+    """Not enough stored reports for the given symbol/exchange to compare."""
+ 
+    code = "HISTORY_COMPARE_INSUFFICIENT_DATA"
 
 class AiReportHistoryService:
     def __init__(
@@ -195,6 +199,203 @@ class AiReportHistoryService:
         if not deleted:
             raise AiReportHistoryNotFoundError("Không tìm thấy báo cáo trong lịch sử của người dùng hiện tại.")
         return True
+    
+    async def compare_history(
+        self,
+        *,
+        current_user: CurrentUserIdentity,
+        symbol: str,
+        exchange: str | None = None,
+        baseline_history_id: str | None = None,
+        latest_history_id: str | None = None,
+    ) -> ReportHistoryCompareData:
+        """Compare two already-stored reports for the same symbol/exchange.
+ 
+        Never calls the LLM or crawler: comparison is computed purely from
+        columns already persisted in report history (total_score, risk_score,
+        data_confidence, decision_label, created_at).
+ 
+        Default behaviour (no ids given): compares the 2 most recent reports
+        for `symbol` (+ `exchange` of the current user, auto-resolved from the
+        latest report if `exchange` is omitted).
+        """
+        self._ensure_enabled()
+        normalized_symbol = normalize_symbol(symbol)
+ 
+        if baseline_history_id and latest_history_id:
+            baseline_row, latest_row = await self._load_explicit_pair(
+                current_user=current_user,
+                normalized_symbol=normalized_symbol,
+                exchange=exchange,
+                baseline_history_id=baseline_history_id,
+                latest_history_id=latest_history_id,
+            )
+        else:
+            baseline_row, latest_row = await self._load_latest_pair(
+                current_user=current_user,
+                normalized_symbol=normalized_symbol,
+                exchange=exchange,
+            )
+ 
+        return self._build_compare_data(baseline_row, latest_row)
+ 
+    async def _load_latest_pair(
+        self,
+        *,
+        current_user: CurrentUserIdentity,
+        normalized_symbol: str,
+        exchange: str | None,
+    ) -> tuple[Any, Any]:
+        resolved_exchange = str(exchange).strip().upper() if exchange else None
+ 
+        if not resolved_exchange:
+            try:
+                probe = await asyncio.to_thread(
+                    self.repository.list_by_user,
+                    current_user.mongo_user_id,
+                    filters=AiReportHistoryFilters(symbol=normalized_symbol),
+                    page=1,
+                    limit=1,
+                )
+            except (HistoryStorageNotConfiguredError, AiReportHistoryRepositoryError) as exc:
+                raise AiReportHistoryUnavailableError("Không đọc được lịch sử báo cáo AI để so sánh.") from exc
+            if not probe:
+                raise AiReportHistoryCompareInsufficientDataError(
+                    "Chưa có báo cáo nào trong lịch sử cho mã này để so sánh."
+                )
+            resolved_exchange = str(probe[0].exchange).upper()
+ 
+        try:
+            rows = await asyncio.to_thread(
+                self.repository.list_by_user,
+                current_user.mongo_user_id,
+                filters=AiReportHistoryFilters(symbol=normalized_symbol, exchange=resolved_exchange),
+                page=1,
+                limit=2,
+            )
+        except (HistoryStorageNotConfiguredError, AiReportHistoryRepositoryError) as exc:
+            raise AiReportHistoryUnavailableError("Không đọc được lịch sử báo cáo AI để so sánh.") from exc
+ 
+        if len(rows) < 2:
+            raise AiReportHistoryCompareInsufficientDataError(
+                "Cần ít nhất 2 báo cáo trong lịch sử cùng mã và sàn để so sánh."
+            )
+        # repository.list_by_user is ordered by created_at DESC, so rows[0] is the newest.
+        return rows[1], rows[0]
+ 
+    async def _load_explicit_pair(
+        self,
+        *,
+        current_user: CurrentUserIdentity,
+        normalized_symbol: str,
+        exchange: str | None,
+        baseline_history_id: str,
+        latest_history_id: str,
+    ) -> tuple[Any, Any]:
+        try:
+            baseline_row, latest_row = await asyncio.gather(
+                asyncio.to_thread(self.repository.get_by_id_for_user, baseline_history_id, current_user.mongo_user_id),
+                asyncio.to_thread(self.repository.get_by_id_for_user, latest_history_id, current_user.mongo_user_id),
+            )
+        except (HistoryStorageNotConfiguredError, AiReportHistoryRepositoryError) as exc:
+            raise AiReportHistoryUnavailableError("Không đọc được lịch sử báo cáo AI để so sánh.") from exc
+ 
+        if baseline_row is None or latest_row is None:
+            raise AiReportHistoryNotFoundError("Không tìm thấy báo cáo trong lịch sử của người dùng hiện tại.")
+ 
+        for row in (baseline_row, latest_row):
+            if normalize_symbol(row.symbol) != normalized_symbol:
+                raise AiReportHistoryServiceError(
+                    "Hai báo cáo được chọn không cùng mã cổ phiếu.", code="HISTORY_COMPARE_SYMBOL_MISMATCH"
+                )
+            if exchange and str(row.exchange).upper() != str(exchange).strip().upper():
+                raise AiReportHistoryServiceError(
+                    "Hai báo cáo được chọn không cùng sàn giao dịch.", code="HISTORY_COMPARE_EXCHANGE_MISMATCH"
+                )
+ 
+        if baseline_row.created_at > latest_row.created_at:
+            baseline_row, latest_row = latest_row, baseline_row
+ 
+        return baseline_row, latest_row
+ 
+    def _build_compare_data(self, baseline_row: Any, latest_row: Any) -> ReportHistoryCompareData:
+        score_delta = self._delta(latest_row.total_score, baseline_row.total_score)
+        risk_delta = self._delta(latest_row.risk_score, baseline_row.risk_score)
+        confidence_delta = self._delta(latest_row.data_confidence, baseline_row.data_confidence)
+ 
+        score_threshold = float(getattr(self.settings, "report_compare_score_delta_threshold", 3.0))
+        risk_threshold = float(getattr(self.settings, "report_compare_risk_delta_threshold", 5.0))
+ 
+        trend, trend_label = self._classify_trend(score_delta, score_threshold)
+        recommendation, recommendation_label = self._recommend(trend, risk_delta, risk_threshold)
+ 
+        reasons: list[str] = []
+        if score_delta is None:
+            reasons.append("Không đủ dữ liệu điểm tổng hợp (total_score) để so sánh chính xác.")
+        else:
+            reasons.append(f"Điểm tổng hợp thay đổi {score_delta:+.2f} điểm so với báo cáo trước đó.")
+        if risk_delta is not None:
+            reasons.append(f"Điểm rủi ro thay đổi {risk_delta:+.2f} điểm.")
+        if latest_row.decision_label:
+            reasons.append(f"Nhãn quyết định của báo cáo mới nhất: {latest_row.decision_label}.")
+ 
+        return ReportHistoryCompareData(
+            symbol=latest_row.symbol,
+            exchange=latest_row.exchange,
+            baseline=self._row_to_compare_item(baseline_row),
+            latest=self._row_to_compare_item(latest_row),
+            score_delta=score_delta,
+            risk_delta=risk_delta,
+            confidence_delta=confidence_delta,
+            trend=trend,
+            trend_label=trend_label,
+            recommendation=recommendation,
+            recommendation_label=recommendation_label,
+            reasons=reasons,
+        )
+ 
+    def _classify_trend(self, score_delta: float | None, score_threshold: float) -> tuple[str, str]:
+        if score_delta is None:
+            return "SIDEWAYS", "Đi ngang"
+        if score_delta >= score_threshold:
+            return "IMPROVING", "Cải thiện"
+        if score_delta <= -score_threshold:
+            return "WORSENING", "Xấu đi"
+        return "SIDEWAYS", "Đi ngang"
+ 
+    def _recommend(self, trend: str, risk_delta: float | None, risk_threshold: float) -> tuple[str, str]:
+        risk_increasing = risk_delta is not None and risk_delta >= risk_threshold
+        risk_decreasing = risk_delta is not None and risk_delta < 0
+ 
+        if trend == "IMPROVING":
+            if risk_increasing:
+                return "WATCH", "Theo dõi"
+            return "BUY", "Mua"
+        if trend == "WORSENING":
+            if risk_decreasing:
+                return "WATCH", "Theo dõi"
+            return "SELL", "Bán"
+        return "HOLD", "Giữ"
+    
+    def _delta(self, current: Any, previous: Any) -> float | None:
+        current_val = self._number(current)
+        previous_val = self._number(previous)
+        if current_val is None or previous_val is None:
+            return None
+        return round(current_val - previous_val, 2)
+ 
+    def _row_to_compare_item(self, row: Any) -> ReportHistoryCompareItem:
+        return ReportHistoryCompareItem(
+            id=str(row.id),
+            report_id=row.report_id,
+            created_at=row.created_at,
+            provider=row.provider,
+            model=row.model,
+            total_score=self._decimal_to_float(row.total_score),
+            risk_score=self._decimal_to_float(row.risk_score),
+            data_confidence=self._decimal_to_float(row.data_confidence),
+            decision_label=row.decision_label,
+        )
 
     def _ensure_enabled(self) -> None:
         if getattr(self.repository, "storage_name", "sqlserver") == "file":
