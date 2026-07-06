@@ -21,9 +21,11 @@ from analyse.schemas.report_history import ReportHistoryFilters
 from analyse.schemas.stock import StockAnalysisRequest, StockFetchAnalysisRequest
 from analyse.schemas.watchlist import WatchlistAnalysisRequest
 from analyse.services.ai_report_history_service import (
+    AiReportHistoryCompareInsufficientDataError,
     AiReportHistoryDisabledError,
     AiReportHistoryNotFoundError,
     AiReportHistoryService,
+    AiReportHistoryServiceError,
     AiReportHistoryUnavailableError,
 )
 from analyse.services.config_diagnostic_service import ConfigDiagnosticService
@@ -330,6 +332,50 @@ async def list_report_history(
     message = "Không có báo cáo AI nào trong lịch sử." if _history_total(response_data, data) == 0 else "Tải lịch sử báo cáo AI thành công."
     return api_success(message, data=response_data)
 
+@router.get("/api/ai-reports/history/compare")
+async def compare_report_history(
+    request: Request,
+    symbol: str = Query(...),
+    exchange: str | None = Query(default=None),
+    baseline_history_id: str | None = Query(default=None, alias="baselineHistoryId"),
+    latest_history_id: str | None = Query(default=None, alias="latestHistoryId"),
+    identity_service: UserIdentityService = Depends(get_user_identity_service),
+    history_service: AiReportHistoryService = Depends(get_ai_report_history_service),
+):
+    user_token = get_bearer_token_from_request(request)
+    current_user = await _resolve_current_user(user_token, identity_service)
+    if isinstance(current_user, JSONResponse):
+        return current_user
+
+    if bool(baseline_history_id) != bool(latest_history_id):
+        return _error_response(
+            422,
+            "Cần truyền cả baselineHistoryId và latestHistoryId, hoặc bỏ trống cả hai để dùng 2 báo cáo mới nhất.",
+            "HISTORY_COMPARE_INVALID_PARAMS",
+        )
+
+    try:
+        data = await history_service.compare_history(
+            current_user=current_user,
+            symbol=symbol,
+            exchange=exchange,
+            baseline_history_id=baseline_history_id,
+            latest_history_id=latest_history_id,
+        )
+    except AiReportHistoryDisabledError:
+        return _error_response(503, "Tính năng lịch sử báo cáo AI chưa được bật.", "HISTORY_DISABLED")
+    except AiReportHistoryCompareInsufficientDataError as exc:
+        return _error_response(422, str(exc), exc.code)
+    except AiReportHistoryNotFoundError:
+        return _error_response(404, "Không tìm thấy báo cáo trong lịch sử của người dùng hiện tại.", "HISTORY_NOT_FOUND")
+    except AiReportHistoryServiceError as exc:
+        return _error_response(422, str(exc), exc.code)
+    except AiReportHistoryUnavailableError as exc:
+        if getattr(exc, "code", "") == "AI_REPORT_HISTORY_STORAGE_ERROR":
+            return _error_response(500, "Không thể tải lịch sử báo cáo AI.", "AI_REPORT_HISTORY_STORAGE_ERROR")
+        return _error_response(503, "Không đọc được lịch sử báo cáo AI trong lần này.", "HISTORY_UNAVAILABLE")
+
+    return api_success("So sánh báo cáo lịch sử thành công.", data=data.model_dump())
 
 @router.get("/api/ai-reports/history/{history_id}/visualization-data")
 async def get_report_history_visualization_data(
