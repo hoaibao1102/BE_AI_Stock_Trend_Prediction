@@ -67,6 +67,14 @@ const deleteAlert = async (alertId, userId) => {
   return Alert.deleteOne({ _id: alertId, user_id: userId });
 };
 
+const deleteAlertsByStock = async (userId, stockId) => {
+  return Alert.deleteMany({ user_id: userId, stock_id: stockId });
+};
+
+const deleteAlertsByStockIds = async (userId, stockIds) => {
+  return Alert.deleteMany({ user_id: userId, stock_id: { $in: stockIds } });
+};
+
 const markTriggered = async (alertId, triggeredAt, triggeredValue) => {
   return Alert.findByIdAndUpdate(
     alertId,
@@ -93,5 +101,7 @@ module.exports = {
   createAlert,
   updateAlert,
   deleteAlert,
+  deleteAlertsByStock,
+  deleteAlertsByStockIds,
   markTriggered
 };
