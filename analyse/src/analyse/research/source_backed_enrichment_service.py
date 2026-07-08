@@ -303,7 +303,7 @@ class SourceBackedEnrichmentService:
                     "timeframe": scenario.time_horizon,
                     "action": f"Theo dõi kịch bản {scenario.scenario.lower()} và chỉ nâng/hạ mức quan sát khi điều kiện xác nhận rõ hơn.",
                     "condition": scenario.condition,
-                    "price_zone": "Vùng giá hiện tại; vùng hỗ trợ/kháng cự gần nhất nếu được xác nhận bởi chart.",
+                    "price_zone": None,
                     "position_size": f"Không vượt quá {max_position} danh mục giả định trong khung học tập.",
                     "stop_loss": f"Tín hiệu vô hiệu: {scenario.invalidation_signals[0] if scenario.invalidation_signals else 'dữ liệu mới làm luận điểm suy yếu'}; rủi ro tham chiếu {risk_pct} vốn.",
                     "note": scenario.risk_note,
