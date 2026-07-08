@@ -81,6 +81,18 @@ class LLMChecklistOutput(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class LLMEvidenceOutput(BaseModel):
+    metric_name: str = Field(..., description="Tên chỉ số/số liệu, VD 'P/E', 'Doanh thu Q1/2026'")
+    value: float | str = Field(..., description="Giá trị (số hoặc chuỗi format sẵn)")
+    unit: str | None = Field(default=None, description="Đơn vị: VND, %, tỷ VND, cổ phiếu...")
+    source: str = Field(..., description="Nguồn gốc của số liệu")
+    source_url: str | None = Field(default=None, description="URL bài báo gốc")
+    published_at: str | None = Field(default=None, description="ISO 8601 thời điểm của số liệu/bài báo")
+    note: str | None = Field(default=None, description="Ghi chú thêm")
+
+    model_config = ConfigDict(extra="allow")
+
+
 class LLMReportOutput(BaseModel):
     strengths: list[str] = Field(default_factory=list)
     weaknesses: list[str] = Field(default_factory=list)
@@ -94,5 +106,6 @@ class LLMReportOutput(BaseModel):
     risk_map: list[dict[str, Any] | str] = Field(default_factory=list)
     checklist: list[LLMChecklistOutput] = Field(default_factory=list, json_schema_extra={"minItems": 5})
     evidence_table: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_pool: list[LLMEvidenceOutput] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid")

@@ -14,6 +14,7 @@ class AnalyseOneReportRequest(BaseModel):
     symbol: str
     scope_exchange: str = Field(default="HOSE", validation_alias=AliasChoices("scopeExchange", "exchange", "scope_exchange"), serialization_alias="scopeExchange")
     options: AnalysisOptions = Field(default_factory=AnalysisOptions)
+    force_refresh: bool = Field(default=False, alias="forceRefresh")
 
     model_config = ConfigDict(populate_by_name=True)
 
