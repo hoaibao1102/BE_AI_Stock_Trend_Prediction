@@ -751,11 +751,48 @@ const updateStockMaster = async (id, data) => {
   };
 };
 
+const getStockAnalysisHistory = async (symbol, options = {}) => {
+  const { exchange, days = 3, authToken } = options;
+  const analyseBaseUrl = process.env.ANALYSE_BASE_URL || process.env.ANALYSE_API_BASE_URL || 'http://localhost:5100';
+  if (!analyseBaseUrl) {
+    throw new Error('ANALYSE_SERVICE_UNCONFIGURED');
+  }
+
+  const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const toDate = new Date().toISOString();
+  const url = new URL(`${analyseBaseUrl.replace(/\/$/, '')}/api/ai-reports/history`);
+  url.searchParams.set('symbol', symbol);
+  if (exchange) url.searchParams.set('exchange', exchange);
+  url.searchParams.set('fromDate', fromDate);
+  url.searchParams.set('toDate', toDate);
+  url.searchParams.set('limit', '100');
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Accept: 'application/json',
+        ...(authToken ? { Authorization: authToken } : {})
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`ANALYSE_SERVICE_ERROR: ${response.status}`);
+    }
+
+    const payload = await response.json();
+    return payload?.data || { items: [], total: 0 };
+  } catch (error) {
+    console.error('[StocksService] Failed to fetch stock analysis history', error);
+    throw error;
+  }
+};
+
 module.exports = {
   getStocksList,
   getStockDetail,
   getStockChart,
   getStockAnalysisData,
   createStockMaster,
-  updateStockMaster
+  updateStockMaster,
+  getStockAnalysisHistory
 };

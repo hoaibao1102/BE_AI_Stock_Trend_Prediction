@@ -231,6 +231,163 @@ router.get(
 
 /**
  * @openapi
+ * /api/me/holdings/pnl:
+ *   get:
+ *     summary: Get portfolio P&L (Profit & Loss) summary
+ *     description: |
+ *       Returns unrealized P&L for all ACTIVE holdings of the authenticated user.
+ *       Includes 7-day price history for each stock for mini-chart display.
+ *       This endpoint does NOT call LLM — it only computes numeric values from market data.
+ *       Use POST /api/ai-reports/holdings-advice for AI-powered BUY/HOLD/SELL recommendations.
+ *     tags: [Personal Holdings Tracker]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Holdings P&L retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: Holdings P&L retrieved successfully
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     generated_at:
+ *                       type: string
+ *                       format: date-time
+ *                       example: 2026-07-07T07:30:00.000Z
+ *                     data_as_of:
+ *                       type: string
+ *                       example: "20260707"
+ *                       description: time_id (YYYYMMDD) of the latest market price used
+ *                     portfolio:
+ *                       type: object
+ *                       properties:
+ *                         total_cost:
+ *                           type: number
+ *                           example: 220000000
+ *                         total_market_value:
+ *                           type: number
+ *                           example: 247500000
+ *                         total_unrealized_pnl:
+ *                           type: number
+ *                           example: 27500000
+ *                         total_unrealized_pnl_pct:
+ *                           type: number
+ *                           example: 12.5
+ *                         count_profit:
+ *                           type: integer
+ *                           example: 2
+ *                         count_loss:
+ *                           type: integer
+ *                           example: 1
+ *                     items:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           holding_id:
+ *                             type: string
+ *                             example: 6868f4c7f82f7d4a9210b001
+ *                           symbol:
+ *                             type: string
+ *                             example: HPG
+ *                           company_name:
+ *                             type: string
+ *                             example: Hòa Phát Group
+ *                           market:
+ *                             type: string
+ *                             nullable: true
+ *                             example: HOSE
+ *                           average_cost:
+ *                             type: number
+ *                             example: 25000
+ *                           quantity:
+ *                             type: integer
+ *                             example: 1000
+ *                           holding_date:
+ *                             type: string
+ *                             format: date
+ *                             example: 2026-01-15
+ *                           close_price:
+ *                             type: number
+ *                             nullable: true
+ *                             example: 27150
+ *                           data_as_of:
+ *                             type: string
+ *                             example: "20260707"
+ *                           market_value:
+ *                             type: number
+ *                             nullable: true
+ *                             example: 27150000
+ *                           cost:
+ *                             type: number
+ *                             example: 25000000
+ *                           unrealized_pnl:
+ *                             type: number
+ *                             nullable: true
+ *                             example: 2150000
+ *                           unrealized_pnl_pct:
+ *                             type: number
+ *                             nullable: true
+ *                             example: 8.6
+ *                           status:
+ *                             type: string
+ *                             nullable: true
+ *                             enum: [PROFIT, LOSS]
+ *                             example: PROFIT
+ *                           prices_7d:
+ *                             type: array
+ *                             description: 7 most recent trading sessions (ascending)
+ *                             items:
+ *                               type: object
+ *                               properties:
+ *                                 date:
+ *                                   type: string
+ *                                   example: "20260701"
+ *                                 close:
+ *                                   type: number
+ *                                   nullable: true
+ *                                   example: 26800
+ *                                 open:
+ *                                   type: number
+ *                                   nullable: true
+ *                                 high:
+ *                                   type: number
+ *                                   nullable: true
+ *                                 low:
+ *                                   type: number
+ *                                   nullable: true
+ *                                 volume:
+ *                                   type: number
+ *                                   nullable: true
+ *                                   example: 12500000
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       500:
+ *         description: Internal server error
+ */
+
+// ⚠️ ROUTE ORDER CRITICAL: /holdings/pnl MUST be before /holdings/:symbol
+// so Express does not treat 'pnl' as a symbol param.
+router.get(
+  '/holdings/pnl',
+  authMiddleware,
+  roleMiddleware(['USER']),
+  holdingsController.getHoldingsPnl
+);
+
+/**
+ * @openapi
  * /api/me/holdings/{symbol}:
  *   get:
  *     summary: Get holding detail by stock symbol

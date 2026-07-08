@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone, timedelta
+from typing import Any
 
 from analyse.clients.backend_client import BackendClient
 from analyse.config.settings import Settings, get_settings
@@ -12,7 +14,7 @@ from analyse.research.research_service import ExternalResearchService
 from analyse.research.source_backed_enrichment_service import SourceBackedEnrichmentService
 from analyse.research.vietstock_financial_adapter import VietstockFinancialAdapter
 from analyse.research.vietstock_peer_adapter import VietstockPeerAdapter
-from analyse.schemas.common import ProviderName, api_error, api_success
+from analyse.schemas.common import ProviderName, SourceStatus, api_error, api_success
 from analyse.schemas.llm import LLMReportOutput
 from analyse.schemas.report import (
     AnalyseOneReportRequest,
@@ -132,7 +134,7 @@ class ReportService:
         warnings: list[str] = []
         data_sources: list[DataSourceStatus] = []
         provider_name: ProviderName = payload.provider or self.settings.default_llm_provider
-        if not str(user_token or "").strip():
+        if user_token is None or not user_token.strip():
             return api_error(
                 "Missing Authorization header. Please login again.",
                 "AUTH_REQUIRED",
@@ -166,6 +168,46 @@ class ReportService:
                     code=502,
                     details=[{"field": "current_user", "message": self._safe_error_detail(exc)}],
                 )
+                
+        # Kiểm tra cache trong lịch sử xem đã có báo cáo cho mã này trong vòng 3 ngày chưa
+        force_refresh = getattr(payload, "force_refresh", False)
+        if not force_refresh and history_available and current_user is not None:
+            try:
+                from analyse.schemas.report_history import ReportHistoryFilters
+                recent_start = datetime.now(timezone.utc) - timedelta(days=3)
+                hist_result = await self.history_service.list_history(
+                    current_user=current_user,
+                    filters=ReportHistoryFilters(
+                        symbol=symbol,
+                        exchange=payload.scope_exchange,
+                        fromDate=recent_start,
+                        page=1,
+                        limit=1,
+                    )
+                )
+                if hist_result.total > 0 and hist_result.items:
+                    cached_item = hist_result.items[0]
+                    # Lấy chi tiết báo cáo đã lưu
+                    detail = await self.history_service.get_history_detail(
+                        current_user=current_user,
+                        history_id=cached_item.id
+                    )
+                    if detail and detail.report_json:
+                        logger.info(
+                            "[analyse-one] cache hit for symbol=%s exchange=%s, reusing report_id=%s from history",
+                            symbol,
+                            payload.scope_exchange,
+                            detail.report_id
+                        )
+                        # Đảm bảo response trả về có code và success đầy đủ
+                        resp = dict(detail.report_json)
+                        if "code" not in resp:
+                            resp["code"] = 200
+                        if "success" not in resp:
+                            resp["success"] = True
+                        return resp
+            except Exception as cache_exc:
+                logger.warning("[analyse-one] failed to check or load from history cache: %s", cache_exc)
 
         try:
             watchlist_payload = await self.backend_client.get_watchlists(token=user_token)
@@ -346,7 +388,7 @@ class ReportService:
         if payload.options.render_markdown:
             if self.settings.report_write_markdown:
                 try:
-                    markdown_output_path = self.report_file_service.write_markdown(report_id, markdown_content)
+                    markdown_output_path = self.report_file_service.write_markdown(report_id, markdown_content or "")
                 except Exception as exc:
                     warnings = self._merge_string_lists(warnings, [f"Không ghi được Markdown report: {exc}"])
                 else:
@@ -559,7 +601,9 @@ class ReportService:
                 continue
             name = self._evidence_source_bucket(row)
             bucket = buckets.setdefault(name, {"count": 0, "last_crawled_at": None})
-            bucket["count"] = int(bucket["count"] or 0) + 1
+            count = bucket["count"]
+            if isinstance(count, int):
+                bucket["count"] = count + 1
             crawled_at = row.get("crawled_at") or row.get("published_at")
             if isinstance(crawled_at, str) and crawled_at and (bucket.get("last_crawled_at") is None or crawled_at > str(bucket.get("last_crawled_at"))):
                 bucket["last_crawled_at"] = crawled_at
@@ -707,7 +751,7 @@ class ReportService:
         )
         return normalized, warnings
 
-    def _company_fallback_status(self, fallback_payload: dict, *, useful: bool) -> str:
+    def _company_fallback_status(self, fallback_payload: dict, *, useful: bool) -> SourceStatus:
         raw_status = str((fallback_payload or {}).get("status") or "partial").lower()
         if raw_status in {"disabled", "failed", "insufficient"}:
             return raw_status
@@ -781,7 +825,7 @@ class ReportService:
         except Exception:
             return
 
-    def _save_market_context_debug(self, symbol: str, summary: dict[str, Any]) -> None:
+    def _save_market_context_debug(self, symbol: str, summary: dict) -> None:
         if not self.report_debug_service.enabled:
             return
         try:
@@ -841,7 +885,7 @@ class ReportService:
                     metrics.add(key)
         return sorted(metrics)
 
-    def _cafef_financial_status(self, payload: dict[str, Any], contribution: dict[str, Any]) -> str:
+    def _cafef_financial_status(self, payload: dict[str, Any], contribution: dict[str, Any]) -> SourceStatus:
         if self._cafef_payload_timed_out(payload):
             return "failed"
         raw_status = str(payload.get("status") or contribution.get("raw_status") or "partial").strip().lower()
@@ -1057,11 +1101,8 @@ class ReportService:
             )
 
         if cafef_payload is not None:
-            cafef_contribution = (
-                (merge_report or {}).get("cafef_financial_contribution")
-                if isinstance((merge_report or {}).get("cafef_financial_contribution"), dict)
-                else {}
-            )
+            contrib = (merge_report or {}).get("cafef_financial_contribution")
+            cafef_contribution = contrib if isinstance(contrib, dict) else {}
             status = self._cafef_financial_status(cafef_payload, cafef_contribution)
             detail = self._cafef_financial_detail(cafef_contribution)
             data_sources.append(
@@ -1290,7 +1331,7 @@ class ReportService:
         return enriched, attempts
 
     async def _try_peer_source(self, peer_symbol: str, source_name: str, factory: object, attempts: list[dict]) -> object | None:
-        attempt = {"symbol": peer_symbol, "source": source_name, "status": "failed"}
+        attempt: dict[str, Any] = {"symbol": peer_symbol, "source": source_name, "status": "failed"}
         try:
             timeout = max(1, int(self.settings.peer_web_enrichment_timeout_ms or 30000)) / 1000
             payload = await asyncio.wait_for(factory(), timeout=timeout)  # type: ignore[misc]
@@ -1403,7 +1444,7 @@ class ReportService:
                     return data.get(key)
         return None
 
-    def _safe_float(self, value: object) -> float:
+    def _safe_float(self, value: Any) -> float:
         try:
             return float(value)
         except (TypeError, ValueError):

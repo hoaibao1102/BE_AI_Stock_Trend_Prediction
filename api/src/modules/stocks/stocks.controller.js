@@ -94,11 +94,25 @@ const updateStockMaster = async (req, res, next) => {
   }
 };
 
+const getStockAnalysisHistory = async (req, res, next) => {
+  try {
+    const { symbol } = req.params;
+    const { exchange, days } = req.query;
+    const authToken = req.get('authorization') || null;
+    const result = await stocksService.getStockAnalysisHistory(symbol, { exchange, days, authToken });
+    return success(res, 'Get stock analysis history successfully', result);
+  } catch (error) {
+    logStockEndpointError(req, error);
+    next(error);
+  }
+};
+
 module.exports = {
   getStocks,
   getStockDetail,
   getStockChart,
   getStockAnalysisData,
   createStockMaster,
-  updateStockMaster
+  updateStockMaster,
+  getStockAnalysisHistory
 };

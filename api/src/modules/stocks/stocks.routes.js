@@ -353,6 +353,40 @@ router.get('/:symbol', getChartValidation, validate, stocksController.getStockDe
  */
 router.get('/:symbol/chart', getChartValidation, validate, stocksController.getStockChart);
 
+/**
+ * @openapi
+ * /api/stocks/{symbol}/analysis-history:
+ *   get:
+ *     summary: Retrieve stock analysis report history from Python service
+ *     tags: [Stocks]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: symbol
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: FPT
+ *         description: The uppercase stock symbol
+ *       - in: query
+ *         name: exchange
+ *         schema:
+ *           type: string
+ *           example: HOSE
+ *         description: Stock exchange code (e.g. HOSE, HNX)
+ *       - in: query
+ *         name: days
+ *         schema:
+ *           type: integer
+ *           default: 3
+ *         description: Number of past days to filter report history
+ *     responses:
+ *       200:
+ *         description: Stock analysis history retrieved successfully.
+ */
+router.get('/:symbol/analysis-history', authMiddleware, stocksController.getStockAnalysisHistory);
+
 // Admin Routes (mounted at /api/admin/stocks)
 
 /**

@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     cors_allow_credentials: bool = Field(default=True, alias="CORS_ALLOW_CREDENTIALS")
 
     # LLM model selection
-    default_llm_provider: str = Field(default="openai", alias="DEFAULT_LLM_PROVIDER")
+    default_llm_provider: ProviderName = Field(default="openai", alias="DEFAULT_LLM_PROVIDER")
     allow_request_model_override: bool = Field(default=False, alias="ALLOW_REQUEST_MODEL_OVERRIDE")
 
     backend_api_base_url: str = Field(

@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from analyse.api.dependencies import (
     get_ai_report_history_service,
+    get_holdings_advice_service,
     get_report_service,
     get_user_identity_service,
     get_visualization_dataset_service,
@@ -18,6 +19,7 @@ from analyse.config.settings import get_settings
 from analyse.schemas.common import api_error, api_success
 from analyse.schemas.report import AnalyseOneReportRequest
 from analyse.schemas.report_history import ReportHistoryFilters
+from analyse.schemas.holdings_advice import HoldingsAdviceRequest
 from analyse.schemas.stock import StockAnalysisRequest, StockFetchAnalysisRequest
 from analyse.schemas.watchlist import WatchlistAnalysisRequest
 from analyse.services.ai_report_history_service import (
@@ -29,6 +31,7 @@ from analyse.services.ai_report_history_service import (
     AiReportHistoryUnavailableError,
 )
 from analyse.services.config_diagnostic_service import ConfigDiagnosticService
+from analyse.services.holdings_advice_service import HoldingsAdviceService
 from analyse.services.report_service import ReportService
 from analyse.services.user_identity_service import UserIdentityMalformedError, UserIdentityService, UserIdentityUnauthorizedError
 from analyse.services.visualization_dataset_service import VisualizationDatasetService
@@ -74,13 +77,13 @@ async def fetch_and_analyse_stock(payload: StockFetchAnalysisRequest) -> JSONRes
     )
 
 
-@router.post("/api/ai-reports/analyse-one")
+@router.post("/api/ai-reports/analyse-one", response_model=None)
 async def analyse_one_report(
     payload: AnalyseOneReportRequest,
     request: Request,
     service: ReportService = Depends(get_report_service),
     visualization_service: VisualizationDatasetService = Depends(get_visualization_dataset_service),
-) -> dict:
+) -> dict | JSONResponse:
     user_token = get_bearer_token_from_request(request)
     result = await service.analyse_one_report(payload, user_token=user_token)
     status_code = int(result.get("code", 200)) if isinstance(result, dict) else 200
@@ -94,7 +97,76 @@ async def analyse_one_report(
     return result
 
 
-@router.post("/api/ai-reports/analyse-one/visualization-data")
+@router.post("/api/ai-reports/holdings-advice", response_model=None)
+async def holdings_advice(
+    payload: HoldingsAdviceRequest,
+    request: Request,
+    service: HoldingsAdviceService = Depends(get_holdings_advice_service),
+) -> dict | JSONResponse:
+    """
+    Phân tích danh mục holdings và đưa ra khuyến nghị BUY/HOLD/SELL cho từng mã.
+
+    **Chiến lược Same-Day Dedup:**
+    - Crawler chỉ chạy 1 lần/ngày (EOD) → giá không đổi trong ngày
+    - Nếu đã có báo cáo AI cho mã này hôm nay → trả cache (< 1s, `source: "cache"`)
+    - Nếu chưa có → gọi LLM với P&L context (30-120s, `source: "generated"`)
+    - Nếu LLM lỗi → graceful degradation với rule-based signal (`source: "fallback"`)
+
+    **Rate limit:**
+    - Tối đa 2 LLM calls song song (asyncio.Semaphore)
+    - `forceRefresh: true` bỏ qua cache, tạo báo cáo mới
+
+    **Body:**
+    ```json
+    {
+      "items": [{
+        "symbol": "HPG",
+        "exchange": "HOSE",
+        "average_cost": 25000,
+        "quantity": 1000,
+        "unrealized_pnl": 2150000,
+        "unrealized_pnl_pct": 8.6,
+        "status": "PROFIT"
+      }],
+      "forceRefresh": false
+    }
+    ```
+    """
+    user_token = get_bearer_token_from_request(request)
+    if not str(user_token or "").strip():
+        return JSONResponse(
+            status_code=401,
+            content={
+                "code": 401,
+                "success": False,
+                "message": "Missing Authorization header. Please login again.",
+                "error": {"type": "AUTH_REQUIRED", "code": "AUTH_REQUIRED", "details": []},
+                "data": None,
+            },
+        )
+
+    try:
+        result = await service.generate_advice(payload, user_token)
+    except Exception as exc:
+        logger.error("[holdings-advice] unhandled error: %s", exc, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": 500,
+                "success": False,
+                "message": "Không tạo được khuyến nghị danh mục.",
+                "error": {"type": "HOLDINGS_ADVICE_ERROR", "code": "HOLDINGS_ADVICE_ERROR", "details": []},
+                "data": None,
+            },
+        )
+
+    status_code = int(result.get("code", 200)) if isinstance(result, dict) else 200
+    if status_code >= 400:
+        return JSONResponse(status_code=status_code, content=result)
+    return result
+
+
+@router.post("/api/ai-reports/analyse-one/visualization-data", response_model=None)
 async def analyse_one_visualization_data(
     payload: AnalyseOneReportRequest,
     request: Request,
@@ -102,7 +174,7 @@ async def analyse_one_visualization_data(
     identity_service: UserIdentityService = Depends(get_user_identity_service),
     history_service: AiReportHistoryService = Depends(get_ai_report_history_service),
     visualization_service: VisualizationDatasetService = Depends(get_visualization_dataset_service),
-) -> dict:
+) -> dict | JSONResponse:
     started = time.perf_counter()
     user_token = get_bearer_token_from_request(request)
     _ = service
@@ -581,7 +653,7 @@ async def delete_report_history(
     return api_success("Xóa lịch sử báo cáo AI thành công.", data={"deleted": True})
 
 
-@router.post("/api/ai-reports/analyse-one/visualization-data/signed-url")
+@router.post("/api/ai-reports/analyse-one/visualization-data/signed-url", response_model=None)
 async def create_visualization_signed_url(
     payload: AnalyseOneReportRequest,
     request: Request,
@@ -589,7 +661,7 @@ async def create_visualization_signed_url(
     history_service: AiReportHistoryService = Depends(get_ai_report_history_service),
     visualization_service: VisualizationDatasetService = Depends(get_visualization_dataset_service),
     signed_url_service: VisualizationSignedUrlService = Depends(get_visualization_signed_url_service),
-) -> dict:
+) -> dict | JSONResponse:
     """Create temporary public links for an existing saved visualization dataset."""
     user_token = get_bearer_token_from_request(request)
     settings = visualization_service.settings
@@ -732,7 +804,7 @@ async def get_visualization_csv_signed(
         return _error_response(503, "Tính năng xuất CSV chưa được bật.", "VISUALIZATION_CSV_EXPORT_DISABLED")
     if not str(settings.data_formulator_signed_url_secret or "").strip():
         return _error_response(503, "Signed dataset URL chưa được cấu hình.", "SIGNED_URL_NOT_CONFIGURED")
-    if not str(signature or "").strip():
+    if signature is None or not signature.strip():
         return _error_response(403, "Missing signature", "INVALID_SIGNATURE")
 
     # Validate table name
@@ -800,7 +872,7 @@ async def get_visualization_dataset_signed(
         return _error_response(503, "Tính năng xuất dữ liệu trực quan hóa chưa được bật.", "VISUALIZATION_EXPORT_DISABLED")
     if not str(settings.data_formulator_signed_url_secret or "").strip():
         return _error_response(503, "Signed dataset URL chưa được cấu hình.", "SIGNED_URL_NOT_CONFIGURED")
-    if not str(signature or "").strip():
+    if signature is None or not signature.strip():
         return _error_response(403, "Missing signature", "INVALID_SIGNATURE")
 
     # Verify signature
@@ -962,7 +1034,8 @@ def _cache_visualization_from_current_report(
 def _visualization_response_data(dataset, *, cache_hit: bool, duration_ms: int) -> dict:
     data = dataset.model_dump(mode="json")
     visualization = data.get("visualization") if isinstance(data.get("visualization"), dict) else {}
-    meta = visualization.get("meta") if isinstance(visualization.get("meta"), dict) else {}
+    meta_val = visualization.get("meta")
+    meta: dict = meta_val if isinstance(meta_val, dict) else {}
     meta["cache_hit"] = cache_hit
     meta["duration_ms"] = duration_ms
     visualization["meta"] = meta
