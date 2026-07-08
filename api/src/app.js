@@ -12,6 +12,7 @@ const { usersRouter, adminUsersRouter } = require('./modules/users/users.routes'
 const { stocksRouter, adminStocksRouter } = require('./modules/stocks/stocks.routes');
 const watchlistsRouter = require('./modules/watchlists/watchlists.routes');
 const holdingsRouter = require('./modules/holdings/holdings.routes');
+const portfolioRouter = require('./modules/portfolio/portfolio.routes');
 const { dashboardRouter } = require('./modules/dashboard/dashboard.routes');
 const subscriptionsRouter = require('./modules/subscriptions/subscriptions.routes');
 const adminSubscriptionsRouter = require('./modules/admin-subscriptions/admin-subscriptions.routes');
@@ -87,6 +88,7 @@ app.use('/api/stocks', stocksRouter);
 app.use('/api/admin/stocks', adminStocksRouter);
 app.use('/api/watchlists', watchlistsRouter);
 app.use('/api/me', holdingsRouter);
+app.use('/api/portfolio', portfolioRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/subscriptions', subscriptionsRouter);
 app.use('/api/admin/subscriptions', adminSubscriptionsRouter);
