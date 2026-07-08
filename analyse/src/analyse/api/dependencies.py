@@ -8,6 +8,7 @@ from analyse.config.settings import Settings, get_settings
 from analyse.repositories.ai_report_history_repository import create_ai_report_history_repository
 from analyse.research.research_service import ExternalResearchService
 from analyse.services.ai_report_history_service import AiReportHistoryService
+from analyse.services.holdings_advice_service import HoldingsAdviceService
 from analyse.services.report_service import ReportService
 from analyse.services.user_identity_service import UserIdentityService
 from analyse.services.visualization_dataset_service import VisualizationDatasetService
@@ -55,3 +56,21 @@ def get_report_service() -> ReportService:
         user_identity_service=UserIdentityService(backend_client),
         history_service=get_ai_report_history_service(),
     )
+
+
+def get_holdings_advice_service() -> HoldingsAdviceService:
+    """
+    Factory cho HoldingsAdviceService.
+    Wire đầy đủ dependencies: settings, backend_client, report_service, history_service, user_identity_service, research_service.
+    """
+    settings: Settings = get_settings()
+    backend_client = get_backend_client()
+    return HoldingsAdviceService(
+        settings=settings,
+        backend_client=backend_client,
+        report_service=get_report_service(),
+        history_service=get_ai_report_history_service(),
+        user_identity_service=UserIdentityService(backend_client),
+        research_service=get_external_research_service(),
+    )
+
