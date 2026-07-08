@@ -123,6 +123,53 @@ const findLatestPricesByStockIds = async (stockIds = []) => {
 
 const startSession = async () => mongoose.startSession();
 
+/**
+ * Batch lấy daysLimit ngày giá gần nhất cho nhiều stock cùng lúc.
+ * Returns map: stockId (string) → price[] (ascending by time_id)
+ */
+const findPricesForStockIds = async (stockIds = [], daysLimit = 7) => {
+  if (!stockIds.length) return {};
+
+  const objectIds = stockIds.filter(Boolean);
+  if (!objectIds.length) return {};
+
+  const rows = await FactMarketPrice.aggregate([
+    { $match: { stock_id: { $in: objectIds } } },
+    { $sort: { stock_id: 1, time_id: -1 } },
+    {
+      $group: {
+        _id: '$stock_id',
+        prices: {
+          $push: {
+            date: '$time_id',
+            close: '$close_price',
+            open: '$open_price',
+            high: '$high_price',
+            low: '$low_price',
+            volume: '$volume'
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 1,
+        // slice top-daysLimit (already sorted desc), then reverse to asc
+        prices: { $slice: ['$prices', daysLimit] }
+      }
+    }
+  ]);
+
+  // Build map stockId → prices[] ascending
+  const result = {};
+  for (const row of rows) {
+    const key = row._id.toString();
+    // prices are desc from aggregate; reverse to ascending (chronological)
+    result[key] = (row.prices || []).reverse();
+  }
+  return result;
+};
+
 module.exports = {
   findStockBySymbol,
   findHoldingsByUser,
@@ -131,5 +178,6 @@ module.exports = {
   saveDocument,
   findLatestPriceByStockId,
   findLatestPricesByStockIds,
+  findPricesForStockIds,
   startSession
 };

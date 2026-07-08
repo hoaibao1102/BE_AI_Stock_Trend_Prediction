@@ -51,10 +51,21 @@ const removeHolding = async (req, res, next) => {
   }
 };
 
+const getHoldingsPnl = async (req, res, next) => {
+  try {
+    const userId = req.user._id || req.user.id || req.user.user_id;
+    const result = await holdingsService.getHoldingsPnl(userId);
+    return success(res, 'Holdings P&L retrieved successfully', result);
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getMyHoldings,
   getMyHoldingDetail,
   saveHolding,
   updateHolding,
-  removeHolding
+  removeHolding,
+  getHoldingsPnl
 };
