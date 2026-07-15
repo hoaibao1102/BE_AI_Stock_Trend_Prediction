@@ -9,8 +9,7 @@ services:
       - MSSQL_SA_PASSWORD=${DB_PASSWORD:-StrongP@ssw0rd2026}
       - MSSQL_PID=Developer
     ports:
-      # Exposes database only to localhost on the host machine for secure SSH tunneling/debugging
-      - "127.0.0.1:1433:1433"
+      - "1433:1433"
     volumes:
       - mssql_data:/var/opt/mssql
     restart: always
