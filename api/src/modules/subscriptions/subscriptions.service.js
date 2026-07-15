@@ -71,7 +71,7 @@ const createPayment = async (userId) => {
  * @returns {Promise<Object>} - Updated user subscription info
  */
 const handlePaymentWebhook = async (webhookPayload) => {
-    const { orderCode, status } = webhookPayload;
+    const { orderCode, code } = webhookPayload;
 
     // Find user by order code
     const user = await User.findOne({ payos_order_code: orderCode });
@@ -81,8 +81,8 @@ const handlePaymentWebhook = async (webhookPayload) => {
         throw error;
     }
 
-    // Only process successful payments
-    if (status !== 'PAID') {
+    // Only process successful payments (PayOS data.code = "00", test payload uses status = "PAID")
+    if (code !== '00' && webhookPayload.status !== 'PAID') {
         return {
             userId: user._id,
             plan: user.plan,
