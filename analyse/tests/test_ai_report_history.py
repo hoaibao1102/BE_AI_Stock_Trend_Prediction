@@ -275,10 +275,10 @@ def test_history_repository_wraps_unexpected_storage_errors_safely(monkeypatch):
     assert secret_db_url not in message
 
 
-def test_history_model_created_at_uses_sql_server_utc_default():
+def test_history_model_created_at_uses_utc_default():
     default_clause = str(AiReportHistory.__table__.c.created_at.server_default.arg).upper()
 
-    assert "SYSUTCDATETIME" in default_clause
+    assert "CURRENT_TIMESTAMP" in default_clause
 
 
 class FakeIdentityDependency:

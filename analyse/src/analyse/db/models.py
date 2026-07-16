@@ -1,9 +1,6 @@
-from __future__ import annotations
-
+import uuid
 from datetime import datetime
-
-from sqlalchemy import Boolean, DateTime, Index, Numeric, Unicode, UnicodeText, text
-from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
+from sqlalchemy import Boolean, DateTime, Index, Numeric, Unicode, UnicodeText, text, Uuid
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -14,7 +11,7 @@ class Base(DeclarativeBase):
 class AiReportHistory(Base):
     __tablename__ = "ai_report_histories"
 
-    id: Mapped[str] = mapped_column(UNIQUEIDENTIFIER(as_uuid=False), primary_key=True, server_default=text("NEWID()"))
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     report_id: Mapped[str] = mapped_column(Unicode(120), nullable=False, unique=True)
 
     mongo_user_id: Mapped[str] = mapped_column(Unicode(64), nullable=False)
@@ -45,8 +42,8 @@ class AiReportHistory(Base):
     source_hash: Mapped[str | None] = mapped_column(Unicode(128), nullable=True)
     request_hash: Mapped[str | None] = mapped_column(Unicode(128), nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=text("SYSUTCDATETIME()"))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=text("SYSUTCDATETIME()"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
 
 
 Index("IX_ai_report_histories_user_created", AiReportHistory.mongo_user_id, AiReportHistory.created_at.desc())

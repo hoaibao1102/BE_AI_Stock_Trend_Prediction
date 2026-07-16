@@ -1,24 +1,6 @@
 version: '3.8'
 
 services:
-  db:
-    image: mcr.microsoft.com/mssql/server:2022-latest
-    container_name: analyse-db
-    environment:
-      - ACCEPT_EULA=Y
-      - MSSQL_SA_PASSWORD=${DB_PASSWORD:-StrongP@ssw0rd2026}
-      - MSSQL_PID=Developer
-    ports:
-      - "1433:1433"
-    volumes:
-      - mssql_data:/var/opt/mssql
-    restart: always
-    healthcheck:
-      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "${DB_PASSWORD:-StrongP@ssw0rd2026}", "-Q", "SELECT 1", "-C"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   analyse:
     build:
       context: .
@@ -32,17 +14,11 @@ services:
       - ANALYSE_ENV=production
       - LOG_LEVEL=INFO
       - ENABLE_AI_REPORT_HISTORY=true
-      - AI_REPORT_DB_URL=mssql+pyodbc://sa:${DB_PASSWORD:-StrongP@ssw0rd2026}@db:1433/AIStockAnalysis?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes
+      # Connection URL to Supabase is passed from the .env file
+      - AI_REPORT_DB_URL=${AI_REPORT_DB_URL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - BACKEND_API_BASE_URL=${BACKEND_API_BASE_URL}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
       - DATA_FORMULATOR_SIGNED_URL_SECRET=${DATA_FORMULATOR_SIGNED_URL_SECRET}
-    depends_on:
-      db:
-        condition: service_healthy
     restart: always
-
-volumes:
-  mssql_data:
-    driver: local
