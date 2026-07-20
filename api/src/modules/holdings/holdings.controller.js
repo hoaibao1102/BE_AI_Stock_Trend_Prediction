@@ -61,11 +61,33 @@ const getHoldingsPnl = async (req, res, next) => {
   }
 };
 
+const recordTransaction = async (req, res, next) => {
+  try {
+    const userId = req.user._id || req.user.id || req.user.user_id;
+    const result = await holdingsService.recordTransaction(userId, req.params.symbol, req.body);
+    return success(res, 'Transaction recorded successfully', result, 201);
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getTransactions = async (req, res, next) => {
+  try {
+    const userId = req.user._id || req.user.id || req.user.user_id;
+    const result = await holdingsService.getTransactions(userId, req.params.symbol, req.query);
+    return success(res, 'Transactions retrieved successfully', result);
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getMyHoldings,
   getMyHoldingDetail,
   saveHolding,
   updateHolding,
   removeHolding,
-  getHoldingsPnl
+  getHoldingsPnl,
+  recordTransaction,
+  getTransactions
 };

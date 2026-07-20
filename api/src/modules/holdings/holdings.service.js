@@ -61,10 +61,254 @@ const getMarketLabel = (stock) => {
   return stock?.market_id?.code || stock?.market_id?.name || null;
 };
 
+const round2 = (value) => Math.round(value * 100) / 100;
+
+const computeWeightedAverageCost = (oldQty, oldAvg, buyQty, buyPrice, fee = 0) => {
+  const totalQty = oldQty + buyQty;
+  if (totalQty <= 0) return 0;
+  const totalCost = (oldQty * oldAvg) + (buyQty * buyPrice) + fee;
+  return round2(totalCost / totalQty);
+};
+
+const validateTradeDate = (tradeDate) => validateHoldingDate(tradeDate);
+
+const sanitizeTransactionPayload = (body) => {
+  const tradeDate = validateTradeDate(body.trade_date);
+  const transactionType = String(body.transaction_type || '').trim().toUpperCase();
+
+  if (!['BUY', 'SELL'].includes(transactionType)) {
+    throw createAppError('INVALID_TRANSACTION_TYPE', 400, 'INVALID_TRANSACTION_TYPE');
+  }
+
+  return {
+    transaction_type: transactionType,
+    trade_date: new Date(tradeDate),
+    quantity: body.quantity,
+    price: body.price,
+    fee: body.fee ?? 0,
+    tax: body.tax ?? 0,
+    note: body.note?.trim?.() || ''
+  };
+};
+
+const buildTransactionItem = (transaction) => ({
+  transaction_id: transaction._id.toString(),
+  transaction_type: transaction.transaction_type,
+  trade_date: formatDate(transaction.trade_date),
+  quantity: transaction.quantity,
+  price: transaction.price,
+  fee: transaction.fee,
+  tax: transaction.tax,
+  note: transaction.note || '',
+  status: transaction.status,
+  created_at: transaction.created_at,
+  updated_at: transaction.updated_at
+});
+
+const runWithOptionalTransaction = async (callback) => {
+  let session;
+
+  try {
+    session = await holdingsRepository.startSession();
+    let result;
+    await session.withTransaction(async () => {
+      result = await callback(session);
+    });
+    return result;
+  } catch (error) {
+    const unsupportedTransactions = error?.message?.includes('Transaction numbers are only allowed on a replica set member or mongos')
+      || error?.message?.includes('Transaction support is not available');
+
+    if (!unsupportedTransactions) {
+      throw error;
+    }
+
+    return callback(null);
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
+  }
+};
+
+const buildHoldingResponse = async (holdingDoc, stock) => {
+  const latestPrice = await holdingsRepository.findLatestPriceByStockId(stock._id);
+  const quantity = Number(holdingDoc.quantity) || 0;
+  const averageCost = Number(holdingDoc.average_cost) || 0;
+
+  return {
+    holding_id: holdingDoc._id.toString(),
+    stock: {
+      _id: stock._id.toString(),
+      symbol: stock.symbol,
+      company_name: stock.company_name,
+      market: getMarketLabel(stock)
+    },
+    average_cost: averageCost,
+    quantity,
+    total_cost: round2(averageCost * quantity),
+    holding_date: formatDate(holdingDoc.holding_date),
+    latest_market_price: latestPrice?.close_price ?? null,
+    note: holdingDoc.note || '',
+    status: holdingDoc.status
+  };
+};
+
+const applyBuyTransaction = async (userId, stock, payload, session = null) => {
+  let holding = await holdingsRepository.findHoldingByUserAndStock(userId, stock._id, {
+    includeRemoved: true,
+    session
+  });
+
+  const buyQty = payload.quantity;
+  const buyPrice = payload.price;
+  const fee = payload.fee || 0;
+
+  if (holding && holding.status === 'ACTIVE') {
+    const newQty = holding.quantity + buyQty;
+    const newAvg = computeWeightedAverageCost(holding.quantity, holding.average_cost, buyQty, buyPrice, fee);
+    holding.quantity = newQty;
+    holding.average_cost = newAvg;
+    holding.holding_date = payload.trade_date;
+    if (payload.note) {
+      holding.note = payload.note;
+    }
+    holding.status = 'ACTIVE';
+    holding.removed_at = null;
+    holding = await holdingsRepository.saveDocument(holding, session);
+  } else if (holding && holding.status === 'REMOVED') {
+    holding.average_cost = computeWeightedAverageCost(0, 0, buyQty, buyPrice, fee);
+    holding.quantity = buyQty;
+    holding.holding_date = payload.trade_date;
+    holding.note = payload.note || '';
+    holding.status = 'ACTIVE';
+    holding.removed_at = null;
+    holding = await holdingsRepository.saveDocument(holding, session);
+  } else {
+    holding = await holdingsRepository.createHolding({
+      user_id: userId,
+      stock_id: stock._id,
+      average_cost: computeWeightedAverageCost(0, 0, buyQty, buyPrice, fee),
+      quantity: buyQty,
+      holding_date: payload.trade_date,
+      note: payload.note || '',
+      status: 'ACTIVE',
+      removed_at: null
+    }, session);
+  }
+
+  const transaction = await holdingsRepository.createTransaction({
+    user_id: userId,
+    stock_id: stock._id,
+    transaction_type: 'BUY',
+    trade_date: payload.trade_date,
+    quantity: buyQty,
+    price: buyPrice,
+    fee,
+    tax: payload.tax || 0,
+    note: payload.note,
+    source: 'MANUAL',
+    status: 'ACTIVE'
+  }, session);
+
+  return { holding, transaction };
+};
+
+const applySellTransaction = async (userId, stock, payload, session = null) => {
+  const holding = await holdingsRepository.findHoldingByUserAndStock(userId, stock._id, { session });
+
+  if (!holding) {
+    throw createAppError('HOLDING_NOT_FOUND', 404, 'HOLDING_NOT_FOUND');
+  }
+
+  const sellQty = payload.quantity;
+  if (sellQty > holding.quantity) {
+    throw createAppError('INSUFFICIENT_QUANTITY', 400, 'INSUFFICIENT_QUANTITY', {
+      available_quantity: holding.quantity,
+      requested_quantity: sellQty
+    });
+  }
+
+  const remainingQty = holding.quantity - sellQty;
+  if (remainingQty === 0) {
+    holding.status = 'REMOVED';
+    holding.removed_at = new Date();
+    holding.quantity = 0;
+  } else {
+    holding.quantity = remainingQty;
+    holding.status = 'ACTIVE';
+    holding.removed_at = null;
+  }
+
+  const savedHolding = await holdingsRepository.saveDocument(holding, session);
+
+  const transaction = await holdingsRepository.createTransaction({
+    user_id: userId,
+    stock_id: stock._id,
+    transaction_type: 'SELL',
+    trade_date: payload.trade_date,
+    quantity: sellQty,
+    price: payload.price,
+    fee: payload.fee || 0,
+    tax: payload.tax || 0,
+    note: payload.note,
+    source: 'MANUAL',
+    status: 'ACTIVE'
+  }, session);
+
+  return { holding: savedHolding, transaction };
+};
+
+const recordTransaction = async (userId, symbol, body) => {
+  const stock = await getValidatedStock(symbol);
+  ensureActiveStock(stock);
+  const payload = sanitizeTransactionPayload(body);
+
+  const { holding, transaction } = await runWithOptionalTransaction(async (session) => {
+    if (payload.transaction_type === 'BUY') {
+      return applyBuyTransaction(userId, stock, payload, session);
+    }
+    return applySellTransaction(userId, stock, payload, session);
+  });
+
+  const holdingResponse = holding.status === 'REMOVED'
+    ? null
+    : await buildHoldingResponse(holding, stock);
+
+  return {
+    transaction: buildTransactionItem(transaction),
+    holding: holdingResponse
+  };
+};
+
+const getTransactions = async (userId, symbol, query = {}) => {
+  const stock = await getValidatedStock(symbol);
+  const page = Number(query.page) || DEFAULT_PAGE;
+  const limit = Number(query.limit) || 50;
+  const status = query.status || 'ACTIVE';
+
+  const result = await holdingsRepository.findTransactionsByUserAndStock(userId, stock._id, {
+    page,
+    limit,
+    status
+  });
+
+  return {
+    items: result.items.map(buildTransactionItem),
+    pagination: {
+      page,
+      limit,
+      total: result.total
+    }
+  };
+};
+
 const buildHoldingItem = (holding, latestPriceMap) => {
   const stock = holding.stock_id;
   const stockId = stock?._id?.toString?.() || null;
   const latestMarketPrice = stockId ? latestPriceMap.get(stockId)?.close_price ?? null : null;
+  const quantity = Number(holding.quantity) || 0;
+  const averageCost = Number(holding.average_cost) || 0;
 
   return {
     holding_id: holding._id.toString(),
@@ -74,8 +318,9 @@ const buildHoldingItem = (holding, latestPriceMap) => {
       company_name: stock.company_name,
       market: getMarketLabel(stock)
     } : null,
-    average_cost: holding.average_cost,
-    quantity: holding.quantity,
+    average_cost: averageCost,
+    quantity,
+    total_cost: round2(averageCost * quantity),
     holding_date: formatDate(holding.holding_date),
     latest_market_price: latestMarketPrice,
     note: holding.note || '',
@@ -337,7 +582,8 @@ const getHoldingsPnl = async (userId) => {
         total_unrealized_pnl: 0,
         total_unrealized_pnl_pct: 0,
         count_profit: 0,
-        count_loss: 0
+        count_loss: 0,
+        position_count: 0
       },
       items: []
     };
@@ -425,6 +671,14 @@ const getHoldingsPnl = async (userId) => {
   const totalUnrealizedPnlPct =
     totalCost > 0 ? (totalUnrealizedPnl / totalCost) * 100 : 0;
 
+  const itemsWithAllocation = items.map((item) => ({
+    ...item,
+    allocation_pct:
+      item.market_value != null && totalMarketValue > 0
+        ? round2((item.market_value / totalMarketValue) * 100)
+        : null
+  }));
+
   return {
     generated_at: new Date().toISOString(),
     data_as_of: globalDataAsOf,
@@ -434,9 +688,10 @@ const getHoldingsPnl = async (userId) => {
       total_unrealized_pnl: Math.round(totalUnrealizedPnl),
       total_unrealized_pnl_pct: Math.round(totalUnrealizedPnlPct * 100) / 100,
       count_profit: countProfit,
-      count_loss: countLoss
+      count_loss: countLoss,
+      position_count: items.length
     },
-    items
+    items: itemsWithAllocation
   };
 };
 
@@ -446,5 +701,8 @@ module.exports = {
   saveHolding,
   updateHolding,
   removeHolding,
-  getHoldingsPnl
+  getHoldingsPnl,
+  recordTransaction,
+  getTransactions,
+  computeWeightedAverageCost
 };
