@@ -119,8 +119,23 @@ const buildPortfolioSummary = (items) => {
     count_total: items.length,
     count_priced: priced.length,
     count_profit: priced.filter((item) => item.status === 'PROFIT').length,
-    count_loss: priced.filter((item) => item.status === 'LOSS').length
+    count_loss: priced.filter((item) => item.status === 'LOSS').length,
+    position_count: items.length
   };
+};
+
+const applyAllocationPct = (items) => {
+  const totalMarketValue = round2(
+    items.reduce((sum, item) => sum + (typeof item.market_value === 'number' ? item.market_value : 0), 0)
+  );
+
+  return items.map((item) => ({
+    ...item,
+    allocation_pct:
+      typeof item.market_value === 'number' && totalMarketValue > 0
+        ? round2((item.market_value / totalMarketValue) * 100)
+        : null
+  }));
 };
 
 const deriveRecommendation = ({ hasHolding, pnlPct, trendSlope, recentMovePct }) => {
@@ -205,7 +220,9 @@ const getPortfolioPnl = async (userId) => {
   );
   const prices7dMap = new Map(prices7dEntries);
 
-  const items = holdings.map((holding) => buildPnlItem(holding, latestPriceMap, prices7dMap));
+  const items = applyAllocationPct(
+    holdings.map((holding) => buildPnlItem(holding, latestPriceMap, prices7dMap))
+  );
   const dataAsOf = items.reduce((latest, item) => (item.price_as_of && item.price_as_of > latest ? item.price_as_of : latest), null);
 
   return {

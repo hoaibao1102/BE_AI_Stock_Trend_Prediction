@@ -8,7 +8,9 @@ const {
   getMyHoldingDetailValidation,
   saveHoldingValidation,
   updateHoldingValidation,
-  removeHoldingValidation
+  removeHoldingValidation,
+  recordTransactionValidation,
+  getTransactionsValidation
 } = require('./holdings.validation');
 
 const router = express.Router({ strict: true });
@@ -440,6 +442,24 @@ router.get(
  *       500:
  *         description: Internal server error
  */
+
+router.get(
+  '/holdings/:symbol/transactions',
+  authMiddleware,
+  roleMiddleware(['USER']),
+  getTransactionsValidation,
+  validate,
+  holdingsController.getTransactions
+);
+
+router.post(
+  '/holdings/:symbol/transactions',
+  authMiddleware,
+  roleMiddleware(['USER']),
+  recordTransactionValidation,
+  validate,
+  holdingsController.recordTransaction
+);
 
 router.get(
   '/holdings/:symbol',

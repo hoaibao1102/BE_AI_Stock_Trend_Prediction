@@ -11,3 +11,4 @@ sqlalchemy
 pyodbc
 pytest
 tzdata
+psycopg2-binary

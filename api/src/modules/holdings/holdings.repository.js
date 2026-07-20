@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const DimStock = require('../../database/models/dim-stock.model');
 const UserStockHolding = require('../../database/models/user-stock-holding.model');
+const UserStockTransaction = require('../../database/models/user-stock-transaction.model');
 const FactMarketPrice = require('../../database/models/fact-market-price.model');
 
 const populateStock = {
@@ -123,6 +124,39 @@ const findLatestPricesByStockIds = async (stockIds = []) => {
 
 const startSession = async () => mongoose.startSession();
 
+const createTransaction = async (payload, session = null) => {
+  const options = session ? { session } : {};
+  const [transaction] = await UserStockTransaction.create([payload], options);
+  return transaction;
+};
+
+const findTransactionsByUserAndStock = async (
+  userId,
+  stockId,
+  { page = 1, limit = 50, status = 'ACTIVE' } = {}
+) => {
+  const skip = (page - 1) * limit;
+  const filter = {
+    user_id: userId,
+    stock_id: stockId
+  };
+
+  if (status && status !== 'ALL') {
+    filter.status = status;
+  }
+
+  const [items, total] = await Promise.all([
+    UserStockTransaction.find(filter)
+      .sort({ trade_date: -1, created_at: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    UserStockTransaction.countDocuments(filter)
+  ]);
+
+  return { items, total };
+};
+
 /**
  * Batch lấy daysLimit ngày giá gần nhất cho nhiều stock cùng lúc.
  * Returns map: stockId (string) → price[] (ascending by time_id)
@@ -154,17 +188,14 @@ const findPricesForStockIds = async (stockIds = [], daysLimit = 7) => {
     {
       $project: {
         _id: 1,
-        // slice top-daysLimit (already sorted desc), then reverse to asc
         prices: { $slice: ['$prices', daysLimit] }
       }
     }
   ]);
 
-  // Build map stockId → prices[] ascending
   const result = {};
   for (const row of rows) {
     const key = row._id.toString();
-    // prices are desc from aggregate; reverse to ascending (chronological)
     result[key] = (row.prices || []).reverse();
   }
   return result;
@@ -179,5 +210,7 @@ module.exports = {
   findLatestPriceByStockId,
   findLatestPricesByStockIds,
   findPricesForStockIds,
-  startSession
+  startSession,
+  createTransaction,
+  findTransactionsByUserAndStock
 };

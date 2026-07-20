@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  analyse:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: analyse-service
+    ports:
+      - "5100:5100"
+    environment:
+      - ANALYSE_HOST=0.0.0.0
+      - ANALYSE_PORT=5100
+      - ANALYSE_ENV=production
+      - LOG_LEVEL=INFO
+      - ENABLE_AI_REPORT_HISTORY=true
+      # Connection URL to Supabase is passed from the .env file
+      - AI_REPORT_DB_URL=${AI_REPORT_DB_URL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - BACKEND_API_BASE_URL=${BACKEND_API_BASE_URL}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
+      - DATA_FORMULATOR_SIGNED_URL_SECRET=${DATA_FORMULATOR_SIGNED_URL_SECRET}
+    restart: always
