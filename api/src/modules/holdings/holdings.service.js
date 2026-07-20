@@ -572,19 +572,7 @@ const getHoldingsPnl = async (userId) => {
     limit: ALL_LIMIT
   });
 
-  // 1b. Chỉ giữ holdings có mã đang nằm trong watchlist hiện tại của user.
-  // Watchlist là nguồn sự thật cho các mã "đang theo dõi"; holding của mã đã
-  // xóa khỏi watchlist không được đưa vào phân tích.
-  const watchlistEntries = await watchlistsRepository.findUserWatchlist(userId);
-  const watchlistStockIds = new Set(
-    watchlistEntries
-      .map((entry) => entry.stock_id?._id?.toString())
-      .filter(Boolean)
-  );
-
-  const holdings = result.items.filter((holding) =>
-    watchlistStockIds.has(holding.stock_id?._id?.toString())
-  );
+  const holdings = result.items;
 
   if (!holdings.length) {
     return {
