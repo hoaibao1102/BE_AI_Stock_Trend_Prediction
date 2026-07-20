@@ -19,16 +19,17 @@ from zoneinfo import ZoneInfo
 
 from analyse.clients.backend_client import BackendClient
 from analyse.config.settings import Settings, get_settings
-from analyse.repositories.ai_report_history_repository import AiReportHistoryFilters
+from analyse.repositories.portfolio_daily_advice_repository import PortfolioDailyAdviceRepository
 from analyse.research.research_service import ExternalResearchService
 from analyse.schemas.holdings_advice import (
-    HoldingAdviceItem,
     HoldingAdviceResult,
-    HoldingAdviceReasoning,
+    HoldingAdviceItem,
     HoldingAdviceEvidence,
     HoldingAdviceCriterion,
+    HoldingAdviceReasoning,
     HoldingsAdviceRequest,
     HoldingsAdviceResponse,
+    PortfolioSummaryInput,
 )
 from analyse.schemas.report import AnalyseOneReportRequest
 from analyse.schemas.report_history import ReportHistoryFilters
@@ -146,11 +147,13 @@ class HoldingsAdviceService:
         history_service: AiReportHistoryService | None = None,
         user_identity_service: UserIdentityService | None = None,
         research_service: ExternalResearchService | None = None,
+        daily_advice_repository: PortfolioDailyAdviceRepository | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.backend_client = backend_client or BackendClient(self.settings)
         self.report_service = report_service
         self.history_service = history_service or AiReportHistoryService(self.settings)
+        self.daily_advice_repo = daily_advice_repository or PortfolioDailyAdviceRepository(self.settings)
         self.user_identity_service = user_identity_service or UserIdentityService(
             self.backend_client
         )
@@ -192,9 +195,83 @@ class HoldingsAdviceService:
                 )
             )
 
-        # Semaphore = 2 để tránh burst LLM calls
-        sem = asyncio.Semaphore(2)
-        recent_start = datetime.now(timezone.utc) - timedelta(days=3)
+        portfolio_summary = self._build_portfolio_summary(
+            request.items, request.portfolio_summary
+        )
+
+        concurrency = max(
+            1,
+            min(
+                len(request.items),
+                int(getattr(self.settings, "portfolio_advice_concurrency", 4) or 4),
+            ),
+        )
+        sem = asyncio.Semaphore(concurrency)
+        recent_start = self._portfolio_cache_start()
+
+        logger.info(
+            "[holdings-advice] batch start items=%d concurrency=%d force_refresh=%s",
+            len(request.items),
+            concurrency,
+            request.force_refresh,
+        )
+
+        prefetched_caches: list[Any | None] = [None] * len(request.items)
+        prefetched_daily: list[dict[str, Any] | None] = [None] * len(request.items)
+        advice_date = self.daily_advice_repo.advice_date_str()
+        all_daily_cached = False
+        if not request.force_refresh:
+            daily_checks = await asyncio.gather(
+                *[
+                    asyncio.to_thread(
+                        self.daily_advice_repo.get,
+                        user_id=current_user.mongo_user_id,
+                        symbol=normalize_symbol(item.symbol),
+                        advice_date=advice_date,
+                    )
+                    for item in request.items
+                ],
+                return_exceptions=True,
+            )
+            for idx, cached in enumerate(daily_checks):
+                if isinstance(cached, BaseException):
+                    logger.warning(
+                        "[holdings-advice] daily cache prefetch error symbol=%s: %s",
+                        request.items[idx].symbol,
+                        cached,
+                    )
+                    prefetched_daily[idx] = None
+                else:
+                    prefetched_daily[idx] = cached
+
+            all_daily_cached = all(
+                isinstance(entry, dict) and isinstance(entry.get("advice"), dict)
+                for entry in prefetched_daily
+            )
+
+            if not all_daily_cached:
+                cache_checks = await asyncio.gather(
+                *[
+                    self._check_recent_cache(
+                        current_user=current_user,
+                        symbol=normalize_symbol(item.symbol),
+                        exchange=str(item.exchange or "HOSE").strip().upper(),
+                        recent_start=recent_start,
+                    )
+                    for item in request.items
+                ],
+                return_exceptions=True,
+            )
+            for idx, cached in enumerate(cache_checks):
+                if isinstance(cached, BaseException):
+                    logger.warning(
+                        "[holdings-advice] cache prefetch error symbol=%s: %s",
+                        request.items[idx].symbol,
+                        cached,
+                    )
+                    prefetched_caches[idx] = None
+                else:
+                    prefetched_caches[idx] = cached
 
         tasks = [
             self._process_one(
@@ -204,8 +281,12 @@ class HoldingsAdviceService:
                 sem=sem,
                 recent_start=recent_start,
                 force_refresh=request.force_refresh,
+                portfolio_summary=portfolio_summary,
+                prefetched_cache=prefetched_caches[idx],
+                prefetched_daily=prefetched_daily[idx],
+                advice_date=advice_date,
             )
-            for item in request.items
+            for idx, item in enumerate(request.items)
         ]
 
         results: list[HoldingAdviceResult] = []
@@ -253,11 +334,15 @@ class HoldingsAdviceService:
         sem: asyncio.Semaphore,
         recent_start: datetime,
         force_refresh: bool,
+        portfolio_summary: dict[str, Any] | None = None,
+        prefetched_cache: Any | None = None,
+        prefetched_daily: dict[str, Any] | None = None,
+        advice_date: str,
     ) -> HoldingAdviceResult:
         """
         Xử lý một holding:
-        1. Same-day dedup check (không tốn LLM)
-        2. HIT → trả cached (có gọi detail load full report_json & collect evidence)
+        1. Daily advice cache — không tốn LLM
+        2. Same-day AI report history dedup
         3. MISS → gọi LLM với P&L context (dưới semaphore)
         4. Lỗi → graceful degradation (fallback rule-based)
         """
@@ -270,44 +355,128 @@ class HoldingsAdviceService:
             force_refresh,
         )
 
-        # ── 1. Same-day dedup check ──────────────────────────────────────
+        # ── 1. Daily advice cache (generate once per day) ─────────────────
         if not force_refresh:
+            daily_cached = prefetched_daily
+            if daily_cached is None:
+                daily_cached = await asyncio.to_thread(
+                    self.daily_advice_repo.get,
+                    user_id=current_user.mongo_user_id,
+                    symbol=symbol,
+                    advice_date=advice_date,
+                )
+            if daily_cached and isinstance(daily_cached.get("advice"), dict):
+                logger.info("[holdings-advice] daily-cache=HIT symbol=%s", symbol)
+                try:
+                    cached_result = HoldingAdviceResult.model_validate(daily_cached["advice"])
+                    return self._merge_item_snapshot(item, cached_result, source="cache")
+                except Exception as exc:
+                    logger.warning(
+                        "[holdings-advice] invalid daily cache symbol=%s: %s",
+                        symbol,
+                        exc,
+                    )
+
+        # ── 2. Same-day dedup check (AI report history) ──────────────────
+        cached = prefetched_cache
+        if not force_refresh and cached is None:
             cached = await self._check_recent_cache(
                 current_user=current_user,
                 symbol=symbol,
                 exchange=exchange,
                 recent_start=recent_start,
             )
-            if cached is not None:
-                logger.info("[holdings-advice] cache=HIT symbol=%s", symbol)
-                report_json = None
-                try:
-                    detail = await self.history_service.get_history_detail(
-                        current_user=current_user,
-                        history_id=cached.id
-                    )
-                    report_json = detail.report_json
-                except Exception as exc:
-                    logger.warning("[holdings-advice] failed to load cache detail for symbol=%s: %s", symbol, exc)
-                
-                evidence = await self._collect_evidence(
-                    symbol=symbol,
-                    exchange=exchange,
-                    item=item,
-                    report_json=report_json,
-                    user_token=user_token,
-                )
-                return self._build_from_cache(item, cached, report_json, evidence)
 
-        # ── 2. Generate fresh (under semaphore) ──────────────────────────
+        if not force_refresh and cached is not None:
+            logger.info("[holdings-advice] history-cache=HIT symbol=%s", symbol)
+            report_json = None
+            try:
+                detail = await self.history_service.get_history_detail(
+                    current_user=current_user,
+                    history_id=cached.id
+                )
+                report_json = detail.report_json
+            except Exception as exc:
+                logger.warning("[holdings-advice] failed to load cache detail for symbol=%s: %s", symbol, exc)
+
+            evidence = await self._collect_evidence(
+                symbol=symbol,
+                exchange=exchange,
+                item=item,
+                report_json=report_json,
+                lightweight=True,
+            )
+            result = self._build_from_cache(item, cached, report_json, evidence)
+            await self._persist_daily_advice(
+                current_user.mongo_user_id,
+                symbol,
+                result,
+                source="cache",
+                advice_date=advice_date,
+            )
+            return result
+
+        # ── 3. Generate fresh (under semaphore) ──────────────────────────
         logger.info("[holdings-advice] cache=MISS symbol=%s → calling LLM", symbol)
         async with sem:
-            return await self._generate_fresh(
+            result = await self._generate_fresh(
                 item=item,
                 symbol=symbol,
                 exchange=exchange,
                 user_token=user_token,
+                portfolio_summary=portfolio_summary,
             )
+        await self._persist_daily_advice(
+            current_user.mongo_user_id,
+            symbol,
+            result,
+            source=result.source,
+            advice_date=advice_date,
+        )
+        return result
+
+    async def _persist_daily_advice(
+        self,
+        user_id: str,
+        symbol: str,
+        result: HoldingAdviceResult,
+        *,
+        source: str,
+        advice_date: str,
+    ) -> None:
+        await asyncio.to_thread(
+            self.daily_advice_repo.save,
+            user_id=user_id,
+            symbol=symbol,
+            advice=result.model_dump(by_alias=True),
+            advice_date=advice_date,
+            source=source,
+        )
+
+    @staticmethod
+    def _merge_item_snapshot(
+        item: HoldingAdviceItem,
+        result: HoldingAdviceResult,
+        *,
+        source: str,
+    ) -> HoldingAdviceResult:
+        pnl_signal = _pnl_signal_from_pct(item.unrealized_pnl_pct)
+        return result.model_copy(
+            update={
+                "symbol": item.symbol,
+                "exchange": item.exchange,
+                "company_name": item.company_name,
+                "average_cost": item.average_cost,
+                "quantity": item.quantity,
+                "close_price": item.close_price,
+                "allocation_pct": item.allocation_pct,
+                "unrealized_pnl": item.unrealized_pnl,
+                "unrealized_pnl_pct": item.unrealized_pnl_pct,
+                "status": item.status,
+                "pnl_signal": pnl_signal,
+                "source": source,  # type: ignore[arg-type]
+            }
+        )
 
     async def _check_recent_cache(
         self,
@@ -350,6 +519,7 @@ class HoldingsAdviceService:
         symbol: str,
         exchange: str,
         user_token: str,
+        portfolio_summary: dict[str, Any] | None = None,
     ) -> HoldingAdviceResult:
         """
         Gọi report_service.analyse_one_report() với P&L context inject.
@@ -366,20 +536,25 @@ class HoldingsAdviceService:
                 "close_price": item.close_price,
                 "market_value": item.market_value,
                 "cost": item.cost,
+                "allocation_pct": item.allocation_pct,
+                "exchange": exchange,
                 "unrealized_pnl": item.unrealized_pnl,
                 "unrealized_pnl_pct": item.unrealized_pnl_pct,
                 "status": item.status,
                 "company_name": item.company_name,
+                "portfolio_summary": portfolio_summary,
             }
 
             payload = AnalyseOneReportRequest(
                 symbol=symbol,
                 scope_exchange=exchange,
                 options=AnalysisOptions(
-                    render_markdown=True,
-                    render_html=True,
-                    include_external_research=False,  # Tắt external research để nhanh hơn
-                    pnl_context=pnl_context,  # extra="allow" → pass thẳng
+                    render_markdown=False,
+                    render_html=False,
+                    include_external_research=False,
+                    time_horizon="medium_term",
+                    risk_profile="medium",
+                    pnl_context=pnl_context,
                 ),
             )
 
@@ -392,7 +567,7 @@ class HoldingsAdviceService:
                 exchange=exchange,
                 item=item,
                 report_json=report,
-                user_token=user_token,
+                lightweight=True,
             )
 
             # Extract decision + scores từ report response
@@ -409,7 +584,7 @@ class HoldingsAdviceService:
                 exchange=exchange,
                 item=item,
                 report_json=None,
-                user_token=user_token,
+                lightweight=True,
             )
             return self._build_fallback(item, evidence, error=str(exc)[:200])
 
@@ -732,29 +907,31 @@ class HoldingsAdviceService:
         exchange: str,
         item: HoldingAdviceItem,
         report_json: dict | None,
-        user_token: str,
+        lightweight: bool = False,
+        user_token: str | None = None,
     ) -> list[HoldingAdviceEvidence]:
         evidence: list[HoldingAdviceEvidence] = []
-        
-        # Nguồn 1 — 7 ngày giá từ backend
-        try:
-            chart = await self.backend_client.get_stock_chart(symbol, "7d", token=user_token)
-            evidence.extend(self._evidence_from_chart_7d(chart, item))
-        except Exception as exc:
-            logger.warning("[holdings-advice] chart 7d failed symbol=%s: %s", symbol, exc)
-            
-        # Nguồn 2 — history trong ngày (report_json)
+
         if report_json:
             evidence.extend(self._evidence_from_report_json(report_json))
-            
-        # Nguồn 3 — external research
+
+        if lightweight:
+            return self._dedupe_evidence(evidence)
+
+        if user_token:
+            try:
+                chart = await self.backend_client.get_stock_chart(symbol, "7d", token=user_token)
+                evidence.extend(self._evidence_from_chart_7d(chart, item))
+            except Exception as exc:
+                logger.warning("[holdings-advice] chart 7d failed symbol=%s: %s", symbol, exc)
+
         if self.settings.enable_external_research:
             try:
                 ctx = await self.research_service.search(symbol, item.company_name)
                 evidence.extend(self._evidence_from_research(ctx, symbol))
             except Exception as exc:
                 logger.warning("[holdings-advice] research failed symbol=%s: %s", symbol, exc)
-                
+
         return self._dedupe_evidence(evidence)
 
     def _build_from_cache(
@@ -766,7 +943,7 @@ class HoldingsAdviceService:
         # Trích decision_label từ row
         decision = str(cache_row.decision_label or "").strip() or None
         if decision and decision.upper() in {"BUY", "SELL", "HOLD", "WATCH"}:
-            decision = decision.upper()
+            decision = self._normalize_portfolio_decision(decision.upper())
         else:
             decision = self._pnl_to_decision(pnl_signal)
 
@@ -820,6 +997,7 @@ class HoldingsAdviceService:
             average_cost=item.average_cost,
             quantity=item.quantity,
             close_price=item.close_price,
+            allocation_pct=item.allocation_pct,
             unrealized_pnl=item.unrealized_pnl,
             unrealized_pnl_pct=item.unrealized_pnl_pct,
             status=item.status,
@@ -858,6 +1036,8 @@ class HoldingsAdviceService:
         decision_label = str(system_decision.get("status") or "").strip().upper() or None
         if decision_label not in {"BUY", "SELL", "HOLD", "WATCH"}:
             decision_label = self._pnl_to_decision(pnl_signal)
+        else:
+            decision_label = self._normalize_portfolio_decision(decision_label)
 
         total_score = self._safe_float(scores.get("overall_score"))
         risk_score = self._safe_float(scores.get("risk_score"))
@@ -888,6 +1068,7 @@ class HoldingsAdviceService:
             average_cost=item.average_cost,
             quantity=item.quantity,
             close_price=item.close_price,
+            allocation_pct=item.allocation_pct,
             unrealized_pnl=item.unrealized_pnl,
             unrealized_pnl_pct=item.unrealized_pnl_pct,
             status=item.status,
@@ -927,6 +1108,7 @@ class HoldingsAdviceService:
             average_cost=item.average_cost,
             quantity=item.quantity,
             close_price=item.close_price,
+            allocation_pct=item.allocation_pct,
             unrealized_pnl=item.unrealized_pnl,
             unrealized_pnl_pct=item.unrealized_pnl_pct,
             status=item.status,
@@ -964,10 +1146,15 @@ class HoldingsAdviceService:
         pnl_vnd = item.unrealized_pnl or 0.0
         qty = item.quantity or 0
         status_text = "lãi" if item.status == "PROFIT" else "lỗ"
+        alloc_text = (
+            f", chiếm {item.allocation_pct:.1f}% tỷ trọng danh mục"
+            if item.allocation_pct is not None
+            else ""
+        )
 
         portfolio_fit = (
             f"Vị thế giá vốn trung bình {avg_cost:,.0f} VND đối với {item.symbol} "
-            f"(số lượng {qty:,} CP, giá khớp gần nhất {close:,.0f} VND) đang tạm {status_text} "
+            f"(số lượng {qty:,} CP, giá khớp gần nhất {close:,.0f} VND{alloc_text}) đang tạm {status_text} "
             f"{pnl_pct:+.2f}% (tương đương {pnl_vnd:+,.0f} VND) theo dữ liệu danh mục đã xác thực."
         )
 
@@ -1073,18 +1260,18 @@ class HoldingsAdviceService:
                 price_zone_str = f" với vùng giá quan sát/hành động {', '.join(price_levels)}"
             
             if decision == "BUY":
-                action_plan = f"Khuyến nghị MUA{price_zone_str}. Vùng giá hiện tại thuận lợi để tích lũy thêm cổ phiếu theo kế hoạch."
+                action_plan = f"Khuyến nghị MUA THÊM{price_zone_str}. Cân nhắc tăng tỷ trọng nếu triển vọng vẫn tích cực và chưa vượt ngưỡng tập trung danh mục."
             elif decision == "SELL":
-                action_plan = f"Khuyến nghị BÁN{price_zone_str}. Cân nhắc giảm bớt tỷ trọng để bảo toàn danh mục."
+                action_plan = f"Khuyến nghị GIẢM VỊ THẾ / CHỐT LỜI{price_zone_str}. Cân nhắc giảm bớt tỷ trọng để tái cân bằng danh mục."
             elif decision == "HOLD":
-                action_plan = f"Khuyến nghị GIỮ{price_zone_str}. Tiếp tục nắm giữ cổ phiếu để theo dõi xu hướng tiếp theo."
+                action_plan = f"Khuyến nghị GIỮ NGUYÊN{price_zone_str}. Tiếp tục nắm giữ và theo dõi các mốc giá quan trọng."
         else:
             if decision == "BUY":
-                action_plan = "Khuyến nghị MUA: Vùng giá hiện tại thuận lợi để tích lũy thêm cổ phiếu theo kế hoạch."
+                action_plan = "Khuyến nghị MUA THÊM: Cân nhắc tăng tỷ trọng nếu triển vọng vẫn tích cực."
             elif decision == "SELL":
-                action_plan = "Khuyến nghị BÁN: Cân nhắc giảm bớt tỷ trọng để bảo toàn danh mục."
+                action_plan = "Khuyến nghị GIẢM VỊ THẾ: Cân nhắc chốt lời hoặc cắt lỗ để tái cân bằng danh mục."
             elif decision == "HOLD":
-                action_plan = "Khuyến nghị GIỮ: Tiếp tục nắm giữ cổ phiếu để theo dõi xu hướng tiếp theo."
+                action_plan = "Khuyến nghị GIỮ NGUYÊN: Tiếp tục nắm giữ và theo dõi xu hướng tiếp theo."
 
         # Parse từ mảng reasons của AI nếu có định dạng chuẩn
         if reasons and isinstance(reasons, list):
@@ -1228,15 +1415,126 @@ class HoldingsAdviceService:
         except (ValueError, TypeError):
             return ""
 
+    def _portfolio_cache_start(self) -> datetime:
+        """Mốc bắt đầu ngày giao dịch VN để dedup phân tích portfolio theo ngày."""
+        tz_name = self.settings.analyse_timezone or "Asia/Ho_Chi_Minh"
+        tz = ZoneInfo(tz_name)
+        now_local = datetime.now(tz)
+        start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        return start_local.astimezone(timezone.utc)
+
+    @staticmethod
+    def _normalize_portfolio_decision(decision: str) -> str:
+        """Chuẩn hóa quyết định cho vị thế đang nắm giữ — WATCH không phù hợp danh mục."""
+        normalized = str(decision or "").strip().upper()
+        if normalized == "WATCH":
+            return "HOLD"
+        return normalized if normalized in {"BUY", "SELL", "HOLD"} else "HOLD"
+
+    @staticmethod
+    def _build_portfolio_summary(
+        items: list[HoldingAdviceItem],
+        client_summary: PortfolioSummaryInput | None = None,
+    ) -> dict[str, Any]:
+        """Tổng hợp ngữ cảnh danh mục để inject vào prompt LLM."""
+        total_cost = 0.0
+        total_market_value = 0.0
+        positions: list[dict[str, Any]] = []
+
+        for item in items:
+            cost = item.cost
+            if cost is None and item.average_cost and item.quantity:
+                cost = item.average_cost * item.quantity
+
+            market_value = item.market_value
+            if market_value is None and item.close_price and item.quantity:
+                market_value = item.close_price * item.quantity
+
+            if cost:
+                total_cost += cost
+            if market_value:
+                total_market_value += market_value
+
+            positions.append(
+                {
+                    "symbol": item.symbol,
+                    "allocation_pct": item.allocation_pct,
+                    "market_value": market_value,
+                    "cost": cost,
+                    "unrealized_pnl_pct": item.unrealized_pnl_pct,
+                    "status": item.status,
+                }
+            )
+
+        value_base = total_market_value if total_market_value > 0 else total_cost
+        for position in positions:
+            if position["allocation_pct"] is not None:
+                continue
+            if value_base > 0:
+                basis = (
+                    position["market_value"]
+                    if total_market_value > 0
+                    else position["cost"]
+                )
+                if basis:
+                    position["allocation_pct"] = round(basis / value_base * 100, 2)
+            elif len(items) == 1:
+                position["allocation_pct"] = 100.0
+
+        sorted_positions = sorted(
+            positions,
+            key=lambda row: row.get("allocation_pct") or 0,
+            reverse=True,
+        )
+        top3_alloc = sum(row.get("allocation_pct") or 0 for row in sorted_positions[:3])
+        max_alloc = sorted_positions[0].get("allocation_pct") if sorted_positions else None
+        max_symbol = sorted_positions[0].get("symbol") if sorted_positions else None
+
+        if (max_alloc or 0) >= 40:
+            concentration_risk = "HIGH"
+        elif (max_alloc or 0) >= 25:
+            concentration_risk = "MEDIUM"
+        else:
+            concentration_risk = "LOW"
+
+        summary: dict[str, Any] = {
+            "position_count": len(items),
+            "total_cost": total_cost or None,
+            "total_market_value": total_market_value or None,
+            "top3_allocation_pct": round(top3_alloc, 2) if top3_alloc else None,
+            "max_position_symbol": max_symbol,
+            "max_position_allocation_pct": max_alloc,
+            "concentration_risk": concentration_risk,
+            "positions": sorted_positions,
+        }
+
+        if client_summary:
+            if client_summary.total_cost is not None:
+                summary["total_cost"] = client_summary.total_cost
+            if client_summary.total_market_value is not None:
+                summary["total_market_value"] = client_summary.total_market_value
+            if client_summary.total_unrealized_pnl is not None:
+                summary["total_unrealized_pnl"] = client_summary.total_unrealized_pnl
+            if client_summary.total_unrealized_pnl_pct is not None:
+                summary["total_unrealized_pnl_pct"] = client_summary.total_unrealized_pnl_pct
+            if client_summary.position_count is not None:
+                summary["position_count"] = client_summary.position_count
+            if client_summary.count_profit is not None:
+                summary["count_profit"] = client_summary.count_profit
+            if client_summary.count_loss is not None:
+                summary["count_loss"] = client_summary.count_loss
+
+        return summary
+
     @staticmethod
     def _pnl_to_decision(pnl_signal: str) -> str:
-        """Map rule-based signal sang BUY/HOLD/SELL."""
+        """Map rule-based signal sang hành động quản lý vị thế đang nắm giữ."""
         mapping = {
-            "STRONG_PROFIT_HOLD": "HOLD",   # Lãi lớn → giữ (chốt lời từng phần)
+            "STRONG_PROFIT_HOLD": "HOLD",   # Lãi lớn → giữ / cân nhắc chốt từng phần
             "PROFIT_HOLD": "HOLD",           # Lãi bình thường → giữ
             "NEUTRAL": "HOLD",               # Bình thường → giữ
-            "LOSS_WATCH": "WATCH",           # Lỗ nhẹ → theo dõi
-            "LOSS_REVIEW": "SELL",           # Lỗ nặng → xem xét bán
+            "LOSS_WATCH": "HOLD",            # Lỗ nhẹ → giữ nhưng theo dõi chặt
+            "LOSS_REVIEW": "SELL",           # Lỗ nặng → giảm vị thế
         }
         return mapping.get(pnl_signal, "HOLD")
 

@@ -301,7 +301,7 @@ const buildAiAnalysisPayload = ({ symbol, exchange, authToken, includeAi }) => {
   };
 };
 
-const invokeAnalyseAnalysis = async ({ symbol, exchange, authToken, includeAi }) => {
+const invokeAnalyseAnalysis = async ({ symbol, exchange, authToken, includeAi, pnlContext }) => {
   if (!includeAi) {
     return { available: false, count: 0, history_items: [], source: 'disabled' };
   }
@@ -339,7 +339,8 @@ const invokeAnalyseAnalysis = async ({ symbol, exchange, authToken, includeAi })
         scopeExchange: exchange || 'HOSE',
         options: {
           includeExternalResearch: false,
-          includeFinancials: true
+          includeFinancials: true,
+          pnlContext: pnlContext || undefined
         }
       })
     });
@@ -379,7 +380,7 @@ const invokeAnalyseAnalysis = async ({ symbol, exchange, authToken, includeAi })
   }
 };
 
-const getOrAnalyseWatchlistStock = async ({ symbol, exchange, authToken }) => {
+const getOrAnalyseWatchlistStock = async ({ symbol, exchange, authToken, pnlContext }) => {
   const fs = require('fs');
   const logPath = require('path').join(__dirname, '../../../debug_watchlist.log');
   
@@ -430,7 +431,7 @@ const getOrAnalyseWatchlistStock = async ({ symbol, exchange, authToken }) => {
 
   fs.appendFileSync(logPath, `[DEBUG] ${symbol} - TRIGGERING FRESH LLM ANALYSIS\n`);
   // 3. If no report within the last 3 days, trigger a fresh LLM analysis
-  return await invokeAnalyseAnalysis({ symbol, exchange, authToken, includeAi: true });
+  return await invokeAnalyseAnalysis({ symbol, exchange, authToken, includeAi: true, pnlContext });
 };
 
 const getPortfolioHoldingsAdvice = async (userId, options = {}) => {
@@ -538,20 +539,9 @@ const getPortfolioWatchlistBatch = async (userId, options = {}) => {
   const includeAi = options.includeAi === true;
   const authToken = options.authToken || null;
   const repository = options.portfolioRepository || portfolioRepository;
-  const watchlistRepository = options.watchlistRepository || watchlistsRepository;
-
-  const watchlistEntries = await watchlistRepository.findUserWatchlist(userId);
-  const stockEntries = watchlistEntries.filter((entry) => entry.stock_id).map((entry) => ({
-    entry,
-    symbol: entry.stock_id.symbol,
-    company_name: entry.stock_id.company_name,
-    exchange: entry.stock_id.market_id?.code || entry.stock_id.market_id?.name || 'HOSE',
-    stockId: entry.stock_id._id.toString()
-  }));
 
   const holdings = await repository.findActiveHoldingsByUser(userId);
-  const holdingByStockId = new Map(holdings.map((holding) => [holding.stock_id?._id?.toString(), holding]));
-  const stockIds = stockEntries.map((stock) => stock.stockId);
+  const stockIds = holdings.map((holding) => holding.stock_id?._id).filter(Boolean);
 
   const latestPrices = await repository.findLatestPricesByStockIds(stockIds);
   const latestPriceMap = new Map(latestPrices.map((price) => [price._id.toString(), price]));
@@ -564,46 +554,68 @@ const getPortfolioWatchlistBatch = async (userId, options = {}) => {
   );
   const prices7dMap = new Map(prices7dEntries);
 
-  const items = await Promise.all(
-    stockEntries.map(async ({ entry, symbol, company_name, exchange, stockId }) => {
-      const holding = holdingByStockId.get(stockId) || null;
-      const latest = latestPriceMap.get(stockId) || null;
-      const pricePoints = (prices7dMap.get(stockId) || []).map(buildPricePoint);
-      const closePrice = toNumber(latest?.close_price);
-      const averageCost = holding ? toNumber(holding.average_cost) : null;
-      const quantity = holding ? toNumber(holding.quantity) : null;
-      const cost = typeof averageCost === 'number' && typeof quantity === 'number' ? round2(averageCost * quantity) : null;
-      const marketValue = typeof closePrice === 'number' && typeof quantity === 'number' ? round2(closePrice * quantity) : null;
-      const unrealizedPnl = typeof cost === 'number' && typeof marketValue === 'number' ? round2(marketValue - cost) : null;
-      const unrealizedPnlPct = typeof averageCost === 'number' && averageCost > 0 && typeof closePrice === 'number' ? round2(((closePrice - averageCost) / averageCost) * 100) : null;
-      const status = unrealizedPnl === null ? 'WATCHLIST_ONLY' : unrealizedPnl >= 0 ? 'PROFIT' : 'LOSS';
+  const pnlItems = applyAllocationPct(
+    holdings.map((holding) => buildPnlItem(holding, latestPriceMap, prices7dMap))
+  );
+  const portfolioSummary = buildPortfolioSummary(pnlItems);
 
+  const items = await Promise.all(
+    pnlItems.map(async (pnlItem) => {
+      const pricePoints = pnlItem.prices_7d || [];
       const closes = pricePoints.map((point) => toNumber(point.close)).filter((value) => value !== null);
-      const latestClose = closes[closes.length - 1] ?? closePrice;
+      const latestClose = closes[closes.length - 1] ?? pnlItem.close_price;
       const firstClose = closes[0] ?? latestClose;
       const trendSlope = latestClose && firstClose ? round2(((latestClose - firstClose) / firstClose) * 100) : 0;
-      const recentMovePct = toNumber(latest?.price_change_percent) ?? 0;
-      const recommendation = deriveRecommendation({ hasHolding: Boolean(holding), pnlPct: unrealizedPnlPct, trendSlope, recentMovePct });
-      const aiContext = includeAi ? await getOrAnalyseWatchlistStock({ symbol, exchange, authToken }) : { available: false, count: 0, history_items: [], source: 'disabled' };
+      const recentMovePct = pnlItem.price_change_percent ?? 0;
+      const recommendation = deriveRecommendation({
+        hasHolding: true,
+        pnlPct: pnlItem.unrealized_pnl_pct,
+        trendSlope,
+        recentMovePct
+      });
+      const aiContext = includeAi
+        ? await getOrAnalyseWatchlistStock({
+            symbol: pnlItem.symbol,
+            exchange: pnlItem.exchange,
+            authToken,
+            pnlContext: {
+              average_cost: pnlItem.average_cost,
+              quantity: pnlItem.quantity,
+              close_price: pnlItem.close_price,
+              market_value: pnlItem.market_value,
+              cost: pnlItem.cost,
+              allocation_pct: pnlItem.allocation_pct,
+              exchange: pnlItem.exchange,
+              unrealized_pnl: pnlItem.unrealized_pnl,
+              unrealized_pnl_pct: pnlItem.unrealized_pnl_pct,
+              status: pnlItem.status,
+              company_name: pnlItem.company_name,
+              portfolio_summary: portfolioSummary
+            }
+          })
+        : { available: false, count: 0, history_items: [], source: 'disabled' };
 
       return {
-        watchlist_id: entry._id.toString(),
-        symbol,
-        company_name,
-        exchange,
-        position_status: holding ? 'HELD' : 'WATCHLIST_ONLY',
-        average_cost: averageCost,
-        quantity,
-        close_price: closePrice,
-        cost,
-        market_value: marketValue,
-        unrealized_pnl: unrealizedPnl,
-        unrealized_pnl_pct: unrealizedPnlPct,
-        status,
+        holding_id: pnlItem.holding_id,
+        symbol: pnlItem.symbol,
+        company_name: pnlItem.company_name,
+        exchange: pnlItem.exchange,
+        position_status: 'HELD',
+        average_cost: pnlItem.average_cost,
+        quantity: pnlItem.quantity,
+        holding_date: pnlItem.holding_date,
+        close_price: pnlItem.close_price,
+        price_change: pnlItem.price_change,
+        price_change_percent: pnlItem.price_change_percent,
+        cost: pnlItem.cost,
+        market_value: pnlItem.market_value,
+        unrealized_pnl: pnlItem.unrealized_pnl,
+        unrealized_pnl_pct: pnlItem.unrealized_pnl_pct,
+        status: pnlItem.status,
         recommendation,
         explanation: buildExplanation({
-          symbol,
-          pnlPct: unrealizedPnlPct,
+          symbol: pnlItem.symbol,
+          pnlPct: pnlItem.unrealized_pnl_pct,
           recentMovePct,
           trendSlope,
           recommendation,
@@ -622,8 +634,7 @@ const getPortfolioWatchlistBatch = async (userId, options = {}) => {
           llm_summary: aiContext.llm_summary || null,
           report_id: aiContext.report_id || null
         },
-        holding_date: holding?.holding_date ? formatDate(holding.holding_date) : null,
-        note: holding?.note || ''
+        note: pnlItem.note || ''
       };
     })
   );
@@ -631,7 +642,7 @@ const getPortfolioWatchlistBatch = async (userId, options = {}) => {
   return {
     generated_at: new Date().toISOString(),
     data_as_of: items.reduce((latest, item) => (item.price_as_of && item.price_as_of > latest ? item.price_as_of : latest), null),
-    portfolio_summary: buildPortfolioSummary(items),
+    portfolio_summary: portfolioSummary,
     items
   };
 };
@@ -640,53 +651,75 @@ const getPortfolioWatchlistDetail = async (userId, symbol, options = {}) => {
   const includeAi = options.includeAi === true;
   const authToken = options.authToken || null;
   const repository = options.portfolioRepository || portfolioRepository;
-  const watchlistRepository = options.watchlistRepository || watchlistsRepository;
   const normalizedSymbol = String(symbol || '').trim().toUpperCase();
 
   if (!normalizedSymbol) {
     throw new Error('INVALID_SYMBOL');
   }
 
-  const watchlistEntries = await watchlistRepository.findUserWatchlist(userId);
-  const entry = watchlistEntries.find((item) => item.stock_id?.symbol === normalizedSymbol);
-  if (!entry?.stock_id) {
-    throw new Error('WATCHLIST_ENTRY_NOT_FOUND');
+  const holdings = await repository.findActiveHoldingsByUser(userId);
+  const holding = holdings.find((item) => item.stock_id?.symbol === normalizedSymbol);
+  if (!holding?.stock_id) {
+    throw new Error('HOLDING_NOT_FOUND');
   }
 
-  const holding = (await repository.findActiveHoldingsByUser(userId)).find((item) => item.stock_id?._id?.toString() === entry.stock_id._id.toString()) || null;
-  const latestPrices = await repository.findLatestPricesByStockIds([entry.stock_id._id.toString()]);
-  const latest = latestPrices[0] || null;
-  const prices7d = await repository.findRecentPricesForStock(entry.stock_id._id, RECENT_PRICE_DAYS);
-  const pricePoints = (prices7d || []).map(buildPricePoint);
-  const closePrice = toNumber(latest?.close_price);
-  const averageCost = holding ? toNumber(holding.average_cost) : null;
-  const quantity = holding ? toNumber(holding.quantity) : null;
-  const cost = typeof averageCost === 'number' && typeof quantity === 'number' ? round2(averageCost * quantity) : null;
-  const marketValue = typeof closePrice === 'number' && typeof quantity === 'number' ? round2(closePrice * quantity) : null;
-  const unrealizedPnl = typeof cost === 'number' && typeof marketValue === 'number' ? round2(marketValue - cost) : null;
-  const unrealizedPnlPct = typeof averageCost === 'number' && averageCost > 0 && typeof closePrice === 'number' ? round2(((closePrice - averageCost) / averageCost) * 100) : null;
+  const stock = holding.stock_id;
+  const stockIds = holdings.map((h) => h.stock_id?._id).filter(Boolean);
+  const latestPrices = await repository.findLatestPricesByStockIds(stockIds);
+  const latestPriceMap = new Map(latestPrices.map((price) => [price._id.toString(), price]));
+  const prices7d = await repository.findRecentPricesForStock(stock._id, RECENT_PRICE_DAYS);
+  const prices7dMap = new Map([[stock._id.toString(), prices7d]]);
+
+  const pnlItems = applyAllocationPct(
+    holdings.map((h) => buildPnlItem(h, latestPriceMap, prices7dMap))
+  );
+  const portfolioSummary = buildPortfolioSummary(pnlItems);
+  const pnlItem = pnlItems.find((item) => item.symbol === normalizedSymbol);
+
+  const pricePoints = pnlItem.prices_7d || [];
   const closes = pricePoints.map((point) => toNumber(point.close)).filter((value) => value !== null);
-  const latestClose = closes[closes.length - 1] ?? closePrice;
+  const latestClose = closes[closes.length - 1] ?? pnlItem.close_price;
   const firstClose = closes[0] ?? latestClose;
   const trendSlope = latestClose && firstClose ? round2(((latestClose - firstClose) / firstClose) * 100) : 0;
-  const recentMovePct = toNumber(latest?.price_change_percent) ?? 0;
-  const recommendation = deriveRecommendation({ hasHolding: Boolean(holding), pnlPct: unrealizedPnlPct, trendSlope, recentMovePct });
-  const aiContext = includeAi ? await getOrAnalyseWatchlistStock({ symbol: normalizedSymbol, exchange: entry.stock_id.market_id?.code || entry.stock_id.market_id?.name || 'HOSE', authToken }) : { available: false, count: 0, history_items: [], source: 'disabled' };
+  const recentMovePct = pnlItem.price_change_percent ?? 0;
+  const recommendation = deriveRecommendation({ hasHolding: true, pnlPct: pnlItem.unrealized_pnl_pct, trendSlope, recentMovePct });
+  const exchange = stock.market_id?.code || stock.market_id?.name || 'HOSE';
+  const aiContext = includeAi
+    ? await getOrAnalyseWatchlistStock({
+        symbol: normalizedSymbol,
+        exchange,
+        authToken,
+        pnlContext: {
+          average_cost: pnlItem.average_cost,
+          quantity: pnlItem.quantity,
+          close_price: pnlItem.close_price,
+          market_value: pnlItem.market_value,
+          cost: pnlItem.cost,
+          allocation_pct: pnlItem.allocation_pct,
+          exchange,
+          unrealized_pnl: pnlItem.unrealized_pnl,
+          unrealized_pnl_pct: pnlItem.unrealized_pnl_pct,
+          status: pnlItem.status,
+          company_name: stock.company_name,
+          portfolio_summary: portfolioSummary
+        }
+      })
+    : { available: false, count: 0, history_items: [], source: 'disabled' };
 
   return {
     symbol: normalizedSymbol,
-    company_name: entry.stock_id.company_name,
-    exchange: entry.stock_id.market_id?.code || entry.stock_id.market_id?.name || 'HOSE',
-    position_status: holding ? 'HELD' : 'WATCHLIST_ONLY',
-    average_cost: averageCost,
-    quantity,
-    close_price: closePrice,
-    cost,
-    market_value: marketValue,
-    unrealized_pnl: unrealizedPnl,
-    unrealized_pnl_pct: unrealizedPnlPct,
+    company_name: stock.company_name,
+    exchange,
+    position_status: 'HELD',
+    average_cost: pnlItem.average_cost,
+    quantity: pnlItem.quantity,
+    close_price: pnlItem.close_price,
+    cost: pnlItem.cost,
+    market_value: pnlItem.market_value,
+    unrealized_pnl: pnlItem.unrealized_pnl,
+    unrealized_pnl_pct: pnlItem.unrealized_pnl_pct,
     recommendation,
-    explanation: buildExplanation({ symbol: normalizedSymbol, pnlPct: unrealizedPnlPct, recentMovePct, trendSlope, recommendation, aiContext }),
+    explanation: buildExplanation({ symbol: normalizedSymbol, pnlPct: pnlItem.unrealized_pnl_pct, recentMovePct, trendSlope, recommendation, aiContext }),
     trend_7d_pct: trendSlope,
     prices_7d: pricePoints,
     ai_context: {
@@ -700,8 +733,8 @@ const getPortfolioWatchlistDetail = async (userId, symbol, options = {}) => {
       llm_summary: aiContext.llm_summary || null,
       report_id: aiContext.report_id || null
     },
-    holding_date: holding?.holding_date ? formatDate(holding.holding_date) : null,
-    note: holding?.note || ''
+    holding_date: holding.holding_date ? formatDate(holding.holding_date) : null,
+    note: holding.note || ''
   };
 };
 

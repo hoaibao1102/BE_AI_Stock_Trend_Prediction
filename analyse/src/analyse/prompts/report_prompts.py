@@ -17,17 +17,23 @@ def build_report_prompt(context: dict[str, Any], schema: dict[str, Any] | None =
     if pnl_context:
         pnl_directive = f"""
 CRITICAL PORTFOLIO ADVICE DIRECTIVE:
-Người dùng đang nắm giữ cổ phiếu này trong danh mục. Bạn phải đưa ra phân tích và khuyến nghị dựa trên vị thế hiện tại của họ:
+Người dùng ĐANG NẮM GIỮ cổ phiếu này trong danh mục đầu tư. Bạn phải đưa ra phân tích và khuyến nghị QUẢN LÝ VỊ THẾ (không phải khuyến nghị mua mới từ bên ngoài):
 {build_pnl_context_section(pnl_context)}
+
+QUY TẮC KHUYẾN NGHỊ DANH MỤC (BẮT BUỘC):
+- `system_decision.status` chỉ được là một trong: BUY (mua thêm / tăng tỷ trọng), HOLD (giữ nguyên), SELL (giảm vị thế / chốt lời / cắt lỗ).
+- TUYỆT ĐỐI KHÔNG dùng WATCH — người dùng đã sở hữu cổ phiếu.
+- Cân nhắc tỷ trọng % trong danh mục: nếu mã đang chiếm tỷ trọng cao (>25-30%), ưu tiên khuyến nghị giữ hoặc giảm vị thế thay vì mua thêm.
+- Khuyến nghị phải gắn với vị thế thực tế: giá vốn, số lượng, lãi/lỗ chưa thực hiện, tỷ trọng danh mục.
 
 LƯU Ý ĐƠN VỊ TÀI CHÍNH QUAN TRỌNG: Tất cả các số tài chính trong JSON CONTEXT (như doanh thu/revenue, lợi nhuận/profit_after_tax, nợ/total_liabilities, vốn chủ/equity, tài sản/total_assets, v.v.) đều có đơn vị gốc là TRIỆU ĐỒNG (million VND). Khi viết phân tích, bạn PHẢI đổi sang TỶ ĐỒNG (billion VND) bằng cách chia các số này cho 1,000. Ví dụ: doanh thu 12480000 nghĩa là 12,480 tỷ VND. Tuyệt đối không được giữ nguyên đơn vị triệu đồng mà chia cho 1 tỷ dẫn đến ghi nhận doanh thu/lợi nhuận 0.0 tỷ đồng.
 
-Yêu cầu bắt buộc: Mảng `system_decision.reasons` phải chứa đúng 5 chuỗi (5 lý do) tương ứng với 5 tiêu chí sau và bắt đầu chính xác bằng các tiền tố dưới đây. Mỗi lý do/tiêu chí phải cực kỳ chi tiết, thuyết phục cao, BẮT BUỘC phải kèm theo các con số, số liệu cụ thể (như tỷ lệ %, doanh thu, lợi nhuận, P/E, P/B, giá vốn, giá hiện tại, v.v. đã được xác thực từ JSON CONTEXT) và trích nguồn tham khảo trực tiếp (ví dụ: theo BCTC Q3/2025, nguồn CafeF, nguồn Vietstock) để người dùng có thể tự check lại. Tuyệt đối không viết nhận định chung chung, suông và thiếu số liệu dẫn chứng:
-1. "VỊ THẾ GIÁ VỐN: <nêu rõ các con số như giá vốn trung bình, giá đóng cửa hiện tại, số lượng nắm giữ, tỷ lệ lãi/lỗ % và giá trị lãi/lỗ VND thực tế từ danh mục được cung cấp trong CONTEXT, đánh giá mức độ rủi ro vị thế hiện tại>"
+Yêu cầu bắt buộc: Mảng `system_decision.reasons` phải chứa đúng 5 chuỗi (5 lý do) tương ứng với 5 tiêu chí sau và bắt đầu chính xác bằng các tiền tố dưới đây. Mỗi lý do/tiêu chí phải cực kỳ chi tiết, thuyết phục cao, BẮT BUỘC phải kèm theo các con số, số liệu cụ thể (như tỷ lệ %, doanh thu, lợi nhuận, P/E, P/B, giá vốn, giá hiện tại, tỷ trọng danh mục, v.v. đã được xác thực từ JSON CONTEXT) và trích nguồn tham khảo trực tiếp (ví dụ: theo BCTC Q3/2025, nguồn CafeF, nguồn Vietstock) để người dùng có thể tự check lại. Tuyệt đối không viết nhận định chung chung, suông và thiếu số liệu dẫn chứng:
+1. "VỊ THẾ GIÁ VỐN: <nêu rõ các con số như giá vốn trung bình, giá đóng cửa hiện tại, số lượng nắm giữ, tỷ trọng % trong danh mục, tỷ lệ lãi/lỗ % và giá trị lãi/lỗ VND thực tế từ danh mục được cung cấp trong CONTEXT, đánh giá mức độ rủi ro vị thế hiện tại>"
 2. "SỨC KHỎE TÀI CHÍNH: <tóm tắt chi tiết với các số liệu cụ thể về doanh thu, lợi nhuận sau thuế, nợ vay hoặc các biên tài chính của kỳ báo cáo gần nhất trong CONTEXT kèm nguồn và thời gian như BCTC Q1/2026 nguồn Vietstock Finance/CafeF>"
 3. "ĐỊNH GIÁ & ĐỐI THỦ: <nêu cụ thể chỉ số định giá P/E, P/B, ROE hiện tại của cổ phiếu và so sánh trực tiếp bằng số liệu cụ thể với trung bình ngành hoặc các đối thủ cạnh tranh cùng ngành được liệt kê trong CONTEXT kèm nguồn tham khảo>"
 4. "XU HƯỚNG & THỊ TRƯỜNG: <nêu cụ thể phần trăm thay đổi giá gần đây, khối lượng giao dịch hoặc xu hướng của VN-Index với các con số cụ thể từ bối cảnh thị trường trong CONTEXT>"
-5. "NGUYÊN TẮC HÀNH ĐỘNG: <khuyến nghị hành động cụ thể giữ/bán/mua kèm theo số liệu cụ thể về vùng giá chốt lời Target và cắt lỗ Stop-loss hoặc tỷ trọng giải ngân khuyến nghị dựa trên các mức hỗ trợ/kháng cự có trong CONTEXT>"
+5. "NGUYÊN TẮC HÀNH ĐỘNG: <khuyến nghị hành động cụ thể mua thêm/giữ nguyên/giảm vị thế/chốt lời/cắt lỗ kèm theo số liệu cụ thể về vùng giá chốt lời Target và cắt lỗ Stop-loss hoặc tỷ trọng khuyến nghị dựa trên các mức hỗ trợ/kháng cự có trong CONTEXT>"
 """.strip()
 
     return f"""{get_system_prompt()}
@@ -110,14 +116,24 @@ def build_pnl_context_section(pnl_context: dict[str, Any] | None) -> str:
 
     average_cost = pnl_context.get("average_cost")
     quantity = pnl_context.get("quantity")
+    close_price = pnl_context.get("close_price")
+    market_value = pnl_context.get("market_value")
+    cost = pnl_context.get("cost")
+    allocation_pct = pnl_context.get("allocation_pct")
+    exchange = pnl_context.get("exchange")
     unrealized_pnl = pnl_context.get("unrealized_pnl")
     unrealized_pnl_pct = pnl_context.get("unrealized_pnl_pct")
     status = pnl_context.get("status")
     company_name = pnl_context.get("company_name", "")
+    portfolio_summary = pnl_context.get("portfolio_summary") or {}
 
     # Format số
     cost_str = f"{average_cost:,.0f}" if average_cost is not None else "N/A"
     qty_str = f"{quantity:,}" if quantity is not None else "N/A"
+    close_str = f"{close_price:,.0f}" if close_price is not None else "N/A"
+    mv_str = f"{market_value:,.0f}" if market_value is not None else "N/A"
+    total_cost_str = f"{cost:,.0f}" if cost is not None else "N/A"
+    alloc_str = f"{allocation_pct:.1f}%" if allocation_pct is not None else "N/A"
 
     if unrealized_pnl is not None and unrealized_pnl_pct is not None:
         pnl_str = f"{unrealized_pnl:+,.0f} VND ({unrealized_pnl_pct:+.2f}%)"
@@ -127,20 +143,56 @@ def build_pnl_context_section(pnl_context: dict[str, Any] | None) -> str:
         status_str = ""
 
     company_line = f" ({company_name})" if company_name else ""
+    exchange_line = f" — Sàn {exchange}" if exchange else ""
 
     lines = [
-        "## DANH MỤC NHÀ ĐẦU TƯ" + company_line,
+        "## VỊ THẾ ĐANG NẮM GIỮ" + company_line + exchange_line,
         f"- Giá vốn trung bình: {cost_str} VND/cổ phiếu",
         f"- Số lượng nắm giữ: {qty_str} cổ phiếu",
+        f"- Giá thị trường hiện tại: {close_str} VND/cổ phiếu",
+        f"- Giá trị thị trường vị thế: {mv_str} VND (vốn gốc {total_cost_str} VND)",
+        f"- Tỷ trọng trong danh mục: {alloc_str}",
     ]
 
     if unrealized_pnl is not None:
+        lines.append(f"- Lãi/lỗ chưa thực hiện: {pnl_str} — {status_str}")
+
+    if portfolio_summary and isinstance(portfolio_summary, dict):
+        lines.append("")
+        lines.append("## TỔNG QUAN DANH MỤC")
+        position_count = portfolio_summary.get("position_count")
+        total_mv = portfolio_summary.get("total_market_value")
+        total_cost = portfolio_summary.get("total_cost")
+        total_pnl_pct = portfolio_summary.get("total_unrealized_pnl_pct")
+        max_symbol = portfolio_summary.get("max_position_symbol")
+        max_alloc = portfolio_summary.get("max_position_allocation_pct")
+        top3_alloc = portfolio_summary.get("top3_allocation_pct")
+        concentration = portfolio_summary.get("concentration_risk")
+
+        if position_count is not None:
+            lines.append(f"- Số mã đang nắm giữ: {position_count}")
+        if total_mv is not None:
+            lines.append(f"- Tổng giá trị thị trường danh mục: {total_mv:,.0f} VND")
+        if total_cost is not None:
+            lines.append(f"- Tổng vốn đầu tư: {total_cost:,.0f} VND")
+        if total_pnl_pct is not None:
+            lines.append(f"- Lãi/lỗ danh mục: {total_pnl_pct:+.2f}%")
+        if max_symbol and max_alloc is not None:
+            lines.append(f"- Mã tập trung nhất: {max_symbol} ({max_alloc:.1f}%)")
+        if top3_alloc is not None:
+            lines.append(f"- Top 3 mã chiếm: {top3_alloc:.1f}% danh mục")
+        if concentration:
+            risk_label = {
+                "HIGH": "cao — cần cân nhắc tái cân bằng",
+                "MEDIUM": "trung bình",
+                "LOW": "thấp — đa dạng hóa tốt",
+            }.get(str(concentration), str(concentration))
+            lines.append(f"- Mức độ tập trung rủi ro: {risk_label}")
+
+    if unrealized_pnl is not None:
         lines.append(
-            f"- Lãi/lỗ chưa thực hiện: {pnl_str} — {status_str}"
-        )
-        lines.append(
-            "→ Dựa trên vị thế trên, khuyến nghị: giữ / mua thêm / chốt lời / cắt lỗ? "
-            "Cung cấp ngưỡng giá cụ thể (target price, stop-loss)."
+            "→ Dựa trên vị thế trên, khuyến nghị quản lý vị thế: mua thêm / giữ nguyên / giảm vị thế / chốt lời / cắt lỗ? "
+            "Cung cấp ngưỡng giá cụ thể (target price, stop-loss) và lưu ý tỷ trọng danh mục."
         )
 
     return "\n".join(lines)

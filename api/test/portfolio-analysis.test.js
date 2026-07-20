@@ -90,17 +90,7 @@ test('getPortfolioWatchlistBatch returns a full table payload without triggering
   };
 
   const watchlistRepoStub = {
-    findUserWatchlist: async () => [
-      {
-        _id: 'watch-1',
-        stock_id: {
-          _id: 'stock-1',
-          symbol: 'HPG',
-          company_name: 'Hoa Phat',
-          market_id: { code: 'HOSE', name: 'Ho Chi Minh' }
-        }
-      }
-    ]
+    findUserWatchlist: async () => []
   };
 
   const result = await portfolioService.getPortfolioWatchlistBatch('user-1', {
@@ -157,23 +147,23 @@ test('getPortfolioWatchlistHistory fetches analysis history within target days',
 
 test('getPortfolioWatchlistBatch reuses recent reports (within 3 days) and skips LLM', async () => {
   const repoStub = {
-    findActiveHoldingsByUser: async () => [],
-    findLatestPricesByStockIds: async () => [{ _id: 'stock-1', close_price: 28000, time_id: 20260707 }],
-    findRecentPricesForStock: async () => []
-  };
-
-  const watchlistRepoStub = {
-    findUserWatchlist: async () => [
+    findActiveHoldingsByUser: async () => [
       {
-        _id: 'watch-1',
+        _id: 'holding-1',
         stock_id: {
           _id: 'stock-1',
           symbol: 'HPG',
           company_name: 'Hoa Phat',
           market_id: { code: 'HOSE', name: 'Ho Chi Minh' }
-        }
+        },
+        average_cost: 25000,
+        quantity: 1000,
+        holding_date: '2026-01-15T00:00:00.000Z',
+        note: 'Long-term'
       }
-    ]
+    ],
+    findLatestPricesByStockIds: async () => [{ _id: 'stock-1', close_price: 28000, time_id: 20260707 }],
+    findRecentPricesForStock: async () => []
   };
 
   let analyseOneCallCount = 0;
@@ -220,7 +210,6 @@ test('getPortfolioWatchlistBatch reuses recent reports (within 3 days) and skips
   try {
     const result = await portfolioService.getPortfolioWatchlistBatch('user-1', {
       portfolioRepository: repoStub,
-      watchlistRepository: watchlistRepoStub,
       includeAi: true
     });
 

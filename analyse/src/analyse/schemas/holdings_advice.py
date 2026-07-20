@@ -29,6 +29,22 @@ _NEWS_SOURCES = {"cafef_news", "vietstock_news", "google_news"}
 
 
 
+class PortfolioSummaryInput(BaseModel):
+    """Tổng quan danh mục — giúp AI đánh giá tỷ trọng & mức độ tập trung."""
+
+    total_cost: float | None = Field(default=None, alias="totalCost")
+    total_market_value: float | None = Field(default=None, alias="totalMarketValue")
+    total_unrealized_pnl: float | None = Field(default=None, alias="totalUnrealizedPnl")
+    total_unrealized_pnl_pct: float | None = Field(
+        default=None, alias="totalUnrealizedPnlPct"
+    )
+    position_count: int | None = Field(default=None, alias="positionCount")
+    count_profit: int | None = Field(default=None, alias="countProfit")
+    count_loss: int | None = Field(default=None, alias="countLoss")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class HoldingAdviceItem(BaseModel):
     """Một mã cổ phiếu trong holdings kèm thông tin P&L."""
 
@@ -40,6 +56,9 @@ class HoldingAdviceItem(BaseModel):
     close_price: float | None = Field(default=None, description="Giá đóng cửa hiện tại")
     market_value: float | None = Field(default=None, description="Giá trị thị trường hiện tại")
     cost: float | None = Field(default=None, description="Tổng vốn đầu tư")
+    allocation_pct: float | None = Field(
+        default=None, alias="allocationPct", description="% tỷ trọng trong danh mục"
+    )
     unrealized_pnl: float | None = Field(default=None, description="Lãi/lỗ chưa thực hiện (VND)")
     unrealized_pnl_pct: float | None = Field(
         default=None, alias="unrealizedPnlPct", description="% lãi/lỗ"
@@ -54,6 +73,11 @@ class HoldingsAdviceRequest(BaseModel):
 
     items: list[HoldingAdviceItem] = Field(
         ..., description="Danh sách holdings cần phân tích"
+    )
+    portfolio_summary: PortfolioSummaryInput | None = Field(
+        default=None,
+        alias="portfolioSummary",
+        description="Tổng quan danh mục để AI đánh giá tỷ trọng & đa dạng hóa",
     )
     force_refresh: bool = Field(
         default=False,
@@ -146,6 +170,9 @@ class HoldingAdviceResult(BaseModel):
     average_cost: float | None = None
     quantity: int | None = None
     close_price: float | None = None
+    allocation_pct: float | None = Field(
+        default=None, alias="allocationPct", description="% tỷ trọng trong danh mục"
+    )
     unrealized_pnl: float | None = None
     unrealized_pnl_pct: float | None = None
     status: str | None = None
