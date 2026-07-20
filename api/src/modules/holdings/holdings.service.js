@@ -1,4 +1,5 @@
 const holdingsRepository = require('./holdings.repository');
+const { normalizePrices7d } = require('../../utils/price-point.utils');
 
 
 const DEFAULT_STATUS = 'ACTIVE';
@@ -608,6 +609,7 @@ const getHoldingsPnl = async (userId) => {
   let totalMarketValue = 0;
   let countProfit = 0;
   let countLoss = 0;
+  let countNeutral = 0;
   let globalDataAsOf = getTodayTimeId();
 
   const items = holdings.map((holding) => {
@@ -624,28 +626,25 @@ const getHoldingsPnl = async (userId) => {
     const marketValue = closePrice != null ? closePrice * quantity : null;
     const unrealizedPnl = marketValue != null ? marketValue - cost : null;
     const unrealizedPnlPct =
-      unrealizedPnl != null && averageCost > 0
-        ? ((closePrice - averageCost) / averageCost) * 100
-        : null;
+      unrealizedPnl != null && cost > 0
+        ? (unrealizedPnl / cost) * 100
+        : unrealizedPnl != null && averageCost > 0
+          ? ((closePrice - averageCost) / averageCost) * 100
+          : null;
     const status = unrealizedPnl != null ? (unrealizedPnl >= 0 ? 'PROFIT' : 'LOSS') : null;
 
-    // Cộng dồn portfolio (chỉ khi có giá)
     totalCost += cost;
     if (marketValue != null) {
       totalMarketValue += marketValue;
       if (status === 'PROFIT') countProfit += 1;
-      else countLoss += 1;
+      else if (status === 'LOSS') countLoss += 1;
+      else countNeutral += 1;
+    } else {
+      countNeutral += 1;
     }
 
-    // 7d price chart
-    const prices7d = (stockId ? pricesMap[stockId] || [] : []).map((p) => ({
-      date: p.date,
-      close: p.close,
-      open: p.open,
-      high: p.high,
-      low: p.low,
-      volume: p.volume
-    }));
+    // 7d price chart — same format as portfolio module (ISO date + numeric OHLCV)
+    const prices7d = normalizePrices7d(stockId ? pricesMap[stockId] || [] : []);
 
     return {
       holding_id: holding._id?.toString?.() || null,
@@ -671,13 +670,24 @@ const getHoldingsPnl = async (userId) => {
   const totalUnrealizedPnlPct =
     totalCost > 0 ? (totalUnrealizedPnl / totalCost) * 100 : 0;
 
-  const itemsWithAllocation = items.map((item) => ({
-    ...item,
-    allocation_pct:
-      item.market_value != null && totalMarketValue > 0
-        ? round2((item.market_value / totalMarketValue) * 100)
-        : null
-  }));
+  const hasMarketValueBase = totalMarketValue > 0;
+
+  const itemsWithAllocation = items.map((item) => {
+    let allocationPct = null;
+
+    if (hasMarketValueBase && item.market_value != null && item.market_value > 0) {
+      allocationPct = round2((item.market_value / totalMarketValue) * 100);
+    } else if (!hasMarketValueBase && item.cost > 0 && totalCost > 0) {
+      allocationPct = round2((item.cost / totalCost) * 100);
+    } else if (items.length === 1) {
+      allocationPct = 100;
+    }
+
+    return {
+      ...item,
+      allocation_pct: allocationPct
+    };
+  });
 
   return {
     generated_at: new Date().toISOString(),
@@ -689,6 +699,7 @@ const getHoldingsPnl = async (userId) => {
       total_unrealized_pnl_pct: Math.round(totalUnrealizedPnlPct * 100) / 100,
       count_profit: countProfit,
       count_loss: countLoss,
+      count_neutral: countNeutral,
       position_count: items.length
     },
     items: itemsWithAllocation

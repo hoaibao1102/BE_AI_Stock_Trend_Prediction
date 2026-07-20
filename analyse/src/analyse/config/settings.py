@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     backend_current_user_endpoint: str = Field(default="/api/users/me", alias="BACKEND_CURRENT_USER_ENDPOINT")
     backend_stock_detail_endpoint: str = Field(default="/api/stocks/{symbol}", alias="BACKEND_STOCK_DETAIL_ENDPOINT")
     backend_stock_chart_endpoint: str = Field(default="/api/stocks/{symbol}/chart", alias="BACKEND_STOCK_CHART_ENDPOINT")
+    backend_holdings_pnl_endpoint: str = Field(
+        default="/api/me/holdings/pnl",
+        alias="BACKEND_HOLDINGS_PNL_ENDPOINT",
+    )
 
     enable_ai_report_history: bool = Field(default=False, alias="ENABLE_AI_REPORT_HISTORY")
     ai_report_db_url: str | None = Field(default=None, alias="AI_REPORT_DB_URL")
@@ -77,6 +81,11 @@ class Settings(BaseSettings):
     summary_schema_version: str = Field(default="1.0", alias="SUMMARY_SCHEMA_VERSION")
     max_watchlist_symbols: int = Field(default=5, alias="MAX_WATCHLIST_SYMBOLS")
     analyse_one_symbol_only: bool = Field(default=True, alias="ANALYSE_ONE_SYMBOL_ONLY")
+    portfolio_advice_concurrency: int = Field(default=4, alias="PORTFOLIO_ADVICE_CONCURRENCY")
+    portfolio_daily_advice_dir: str = Field(
+        default="storage/portfolio_daily_advice",
+        alias="PORTFOLIO_DAILY_ADVICE_DIR",
+    )
 
     visualization_export_enabled: bool = Field(default=True, alias="VISUALIZATION_EXPORT_ENABLED")
     visualization_schema_version: str = Field(default="visualization.v1", alias="VISUALIZATION_SCHEMA_VERSION")
@@ -259,7 +268,7 @@ class Settings(BaseSettings):
 
     gemini_enabled: bool = Field(default=True, alias="GEMINI_ENABLED")
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
-    gemini_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_MODEL")
+    gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
     gemini_temperature: float = Field(default=0.2, alias="GEMINI_TEMPERATURE")
     gemini_top_p: float = Field(default=0.9, alias="GEMINI_TOP_P")
     gemini_max_output_tokens: int = Field(default=8192, alias="GEMINI_MAX_OUTPUT_TOKENS")

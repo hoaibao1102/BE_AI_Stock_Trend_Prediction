@@ -132,6 +132,10 @@ class BackendClient:
         path = self.settings.backend_watchlist_endpoint
         return await self._get_json(path, token=token, operation="get_watchlists")
 
+    async def get_holdings_pnl(self, *, token: str) -> dict[str, Any]:
+        path = self.settings.backend_holdings_pnl_endpoint
+        return await self._get_json(path, token=token, operation="get_holdings_pnl")
+
     async def get_current_user(self, *, token: str) -> dict[str, Any]:
         path = self.settings.backend_current_user_endpoint
         return await self._get_json(path, token=token, operation="get_current_user")

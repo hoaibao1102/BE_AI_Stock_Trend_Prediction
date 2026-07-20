@@ -157,6 +157,24 @@ const findTransactionsByUserAndStock = async (
   return { items, total };
 };
 
+// Last `daysLimit` distinct trading days for one stock, ascending (chronological).
+const findRecentPricesForStock = async (stockId, daysLimit = 7) => {
+  const prices = await FactMarketPrice.find({ stock_id: stockId })
+    .sort({ time_id: -1, created_at: -1 })
+    .select('time_id open_price high_price low_price close_price volume price_change price_change_percent pe pb roe')
+    .lean();
+
+  const byTimeId = new Map();
+  for (const row of prices) {
+    const key = String(row.time_id ?? '');
+    if (!key || byTimeId.has(key)) continue;
+    byTimeId.set(key, row);
+    if (byTimeId.size >= daysLimit) break;
+  }
+
+  return Array.from(byTimeId.values()).reverse();
+};
+
 /**
  * Batch lấy daysLimit ngày giá gần nhất cho nhiều stock cùng lúc.
  * Returns map: stockId (string) → price[] (ascending by time_id)
@@ -167,38 +185,14 @@ const findPricesForStockIds = async (stockIds = [], daysLimit = 7) => {
   const objectIds = stockIds.filter(Boolean);
   if (!objectIds.length) return {};
 
-  const rows = await FactMarketPrice.aggregate([
-    { $match: { stock_id: { $in: objectIds } } },
-    { $sort: { stock_id: 1, time_id: -1 } },
-    {
-      $group: {
-        _id: '$stock_id',
-        prices: {
-          $push: {
-            date: '$time_id',
-            close: '$close_price',
-            open: '$open_price',
-            high: '$high_price',
-            low: '$low_price',
-            volume: '$volume'
-          }
-        }
-      }
-    },
-    {
-      $project: {
-        _id: 1,
-        prices: { $slice: ['$prices', daysLimit] }
-      }
-    }
-  ]);
+  const entries = await Promise.all(
+    objectIds.map(async (stockId) => {
+      const prices = await findRecentPricesForStock(stockId, daysLimit);
+      return [stockId.toString(), prices];
+    })
+  );
 
-  const result = {};
-  for (const row of rows) {
-    const key = row._id.toString();
-    result[key] = (row.prices || []).reverse();
-  }
-  return result;
+  return Object.fromEntries(entries);
 };
 
 module.exports = {
@@ -209,6 +203,7 @@ module.exports = {
   saveDocument,
   findLatestPriceByStockId,
   findLatestPricesByStockIds,
+  findRecentPricesForStock,
   findPricesForStockIds,
   startSession,
   createTransaction,

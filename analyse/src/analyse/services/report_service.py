@@ -47,6 +47,7 @@ from analyse.services.stock_data_service import StockDataService
 from analyse.services.summary_service import SummaryService
 from analyse.services.user_identity_service import CurrentUserIdentity, UserIdentityMalformedError, UserIdentityService, UserIdentityUnauthorizedError
 from analyse.services.watchlist_service import WatchlistService
+from analyse.services.holdings_service import HoldingsService
 from analyse.utils.datetime_utils import now_iso, timestamp_for_filename
 from analyse.utils.debug_scrub import scrub_debug_payload, scrub_debug_text
 from analyse.utils.symbol_utils import normalize_symbol
@@ -76,6 +77,7 @@ class ReportService:
         self.vietstock_financial_adapter = VietstockFinancialAdapter(self.settings)
         self.vietstock_peer_adapter = VietstockPeerAdapter(self.settings)
         self.watchlist_service = WatchlistService(self.settings)
+        self.holdings_service = HoldingsService()
         self.stock_data_service = StockDataService()
         self.source_collection_coordinator = SourceCollectionCoordinator(
             self.settings,
@@ -133,7 +135,6 @@ class ReportService:
 
         warnings: list[str] = []
         data_sources: list[DataSourceStatus] = []
-        provider_name: ProviderName = payload.provider or self.settings.default_llm_provider
         if user_token is None or not user_token.strip():
             return api_error(
                 "Missing Authorization header. Please login again.",
@@ -209,47 +210,102 @@ class ReportService:
             except Exception as cache_exc:
                 logger.warning("[analyse-one] failed to check or load from history cache: %s", cache_exc)
 
-        try:
-            watchlist_payload = await self.backend_client.get_watchlists(token=user_token)
-            watchlist_items = self.watchlist_service.limit_items(self.watchlist_service.extract_items_from_backend_payload(watchlist_payload))
-            allowed_symbols = [item["symbol"] for item in watchlist_items]
-            data_sources.append(DataSourceStatus(name="Backend /api/watchlists", type="backend_api", status="success"))
-        except Exception as exc:
-            message, code, error_type = self._watchlist_error_response(exc)
-            data_sources.append(DataSourceStatus(name="Backend /api/watchlists", type="backend_api", status="failed", detail=self._safe_error_detail(exc)))
-            return api_error(
-                message,
-                error_type,
-                code=code,
-                details=[{"field": "watchlists", "message": self._safe_error_detail(exc)}],
-            )
+        is_portfolio_analysis = self._is_portfolio_analysis(payload)
+        matched_watchlist_item = None
 
-        if not allowed_symbols:
-            return api_error(
-                "Watchlists đang trống nên không thể xác minh quyền phân tích mã cổ phiếu.",
-                "WATCHLIST_EMPTY",
-                code=403,
-                details=[{"field": "watchlists", "message": "Không tìm thấy mã cổ phiếu nào trong watchlists của người dùng."}],
-            )
+        if is_portfolio_analysis:
+            try:
+                holdings_payload = await self.backend_client.get_holdings_pnl(token=user_token)
+                position_symbols = self.holdings_service.extract_position_symbols(holdings_payload)
+                data_sources.append(
+                    DataSourceStatus(
+                        name="Backend /api/me/holdings/pnl",
+                        type="backend_api",
+                        status="success",
+                    )
+                )
+            except Exception as exc:
+                if self._is_auth_error(exc):
+                    return api_error(
+                        "Phiên đăng nhập đã hết hạn hoặc token không hợp lệ.",
+                        "AUTH_INVALID",
+                        code=401,
+                        details=[{"field": "Authorization", "message": "Backend từ chối token khi tải danh mục đầu tư."}],
+                    )
+                data_sources.append(
+                    DataSourceStatus(
+                        name="Backend /api/me/holdings/pnl",
+                        type="backend_api",
+                        status="failed",
+                        detail=self._safe_error_detail(exc),
+                    )
+                )
+                return api_error(
+                    "Không tải được danh mục đầu tư để xác minh quyền phân tích.",
+                    "PORTFOLIO_UNAVAILABLE",
+                    code=502,
+                    details=[{"field": "holdings", "message": self._safe_error_detail(exc)}],
+                )
 
-        is_allowed, symbol = self.watchlist_service.validate_symbol_allowed(
-            symbol,
-            allowed_symbols,
-            requested_exchange=payload.scope_exchange,
-            allowed_items=watchlist_items,
-        )
-        if self.settings.analyse_one_symbol_only and not is_allowed:
-            return api_error(
-                "Mã này không nằm trong watchlists nên không thể phân tích.",
-                "SYMBOL_NOT_IN_WATCHLIST",
-                code=403,
-                details=[{"field": "symbol", "message": f"{symbol} không nằm trong danh sách watchlists hợp lệ."}],
+            if not position_symbols:
+                return api_error(
+                    "Danh mục đầu tư đang trống nên không thể phân tích vị thế.",
+                    "PORTFOLIO_EMPTY",
+                    code=403,
+                    details=[{"field": "holdings", "message": "Không tìm thấy vị thế ACTIVE nào trong danh mục."}],
+                )
+
+            if symbol not in set(position_symbols):
+                return api_error(
+                    f"Mã {symbol} không nằm trong danh mục đầu tư đang nắm giữ.",
+                    "SYMBOL_NOT_IN_PORTFOLIO",
+                    code=403,
+                    details=[{"field": "symbol", "message": f"{symbol} không phải vị thế đang nắm giữ."}],
+                )
+        else:
+            try:
+                watchlist_payload = await self.backend_client.get_watchlists(token=user_token)
+                watchlist_items = self.watchlist_service.limit_items(
+                    self.watchlist_service.extract_items_from_backend_payload(watchlist_payload)
+                )
+                allowed_symbols = [item["symbol"] for item in watchlist_items]
+                data_sources.append(DataSourceStatus(name="Backend /api/watchlists", type="backend_api", status="success"))
+            except Exception as exc:
+                message, code, error_type = self._watchlist_error_response(exc)
+                data_sources.append(DataSourceStatus(name="Backend /api/watchlists", type="backend_api", status="failed", detail=self._safe_error_detail(exc)))
+                return api_error(
+                    message,
+                    error_type,
+                    code=code,
+                    details=[{"field": "watchlists", "message": self._safe_error_detail(exc)}],
+                )
+
+            if not allowed_symbols:
+                return api_error(
+                    "Watchlists đang trống nên không thể xác minh quyền phân tích mã cổ phiếu.",
+                    "WATCHLIST_EMPTY",
+                    code=403,
+                    details=[{"field": "watchlists", "message": "Không tìm thấy mã cổ phiếu nào trong watchlists của người dùng."}],
+                )
+
+            is_allowed, symbol = self.watchlist_service.validate_symbol_allowed(
+                symbol,
+                allowed_symbols,
+                requested_exchange=payload.scope_exchange,
+                allowed_items=watchlist_items,
             )
-        matched_watchlist_item = self.watchlist_service.find_matching_item(
-            symbol,
-            requested_exchange=payload.scope_exchange,
-            allowed_items=watchlist_items,
-        )
+            if self.settings.analyse_one_symbol_only and not is_allowed:
+                return api_error(
+                    "Mã này không nằm trong watchlists nên không thể phân tích.",
+                    "SYMBOL_NOT_IN_WATCHLIST",
+                    code=403,
+                    details=[{"field": "symbol", "message": f"{symbol} không nằm trong danh sách watchlists hợp lệ."}],
+                )
+            matched_watchlist_item = self.watchlist_service.find_matching_item(
+                symbol,
+                requested_exchange=payload.scope_exchange,
+                allowed_items=watchlist_items,
+            ) if is_allowed else None
 
         try:
             stock_detail, stock_source_warnings = await self._load_stock_detail_for_analysis(symbol, payload.scope_exchange, data_sources, user_token=user_token)
@@ -327,16 +383,11 @@ class ReportService:
         )
         self._save_market_context_debug(symbol, summary)
 
-        selected_model = self._select_model_override(payload.model, warnings)
-        provider = get_llm_provider(provider_name, self.settings, model=selected_model)
-        llm_result = await provider.generate_report_json(
-            payload={
-                "symbol": symbol,
-                "scope_exchange": payload.scope_exchange,
-                "options": payload.options.model_dump(by_alias=True),
-                "summary": summary,
-            },
-            schema=LLMReportOutput.model_json_schema(),
+        llm_result, provider_name = await self._generate_report_with_provider_fallback(
+            payload=payload,
+            summary=summary,
+            warnings=warnings,
+            symbol=symbol,
         )
         warnings = self._merge_string_lists(warnings, llm_result.warnings)
         provider_metadata = self.report_assembly_service.build_provider_metadata(
@@ -1562,6 +1613,69 @@ class ReportService:
             )
         except Exception:
             return
+
+    def _is_portfolio_analysis(self, payload: AnalyseOneReportRequest) -> bool:
+        options = payload.options.model_dump(by_alias=True)
+        return bool(options.get("pnl_context") or options.get("pnlContext"))
+
+    def _is_long_term_analysis(self, payload: AnalyseOneReportRequest) -> bool:
+        options = payload.options.model_dump(by_alias=True)
+        horizon = str(options.get("time_horizon") or options.get("timeHorizon") or "").strip().lower()
+        return horizon in {"long", "long_term"}
+
+    def _resolve_llm_provider_attempts(
+        self,
+        payload: AnalyseOneReportRequest,
+    ) -> list[tuple[ProviderName, str | None]]:
+        if self._is_portfolio_analysis(payload) or self._is_long_term_analysis(payload):
+            return [
+                ("gemini", self.settings.gemini_model or "gemini-2.5-flash"),
+                ("openai", self.settings.openai_model),
+            ]
+
+        if payload.provider:
+            return [(payload.provider, payload.model)]
+
+        return [(self.settings.default_llm_provider, payload.model)]
+
+    async def _generate_report_with_provider_fallback(
+        self,
+        *,
+        payload: AnalyseOneReportRequest,
+        summary: dict,
+        warnings: list[str],
+        symbol: str,
+    ):
+        attempts = self._resolve_llm_provider_attempts(payload)
+        llm_payload = {
+            "symbol": symbol,
+            "scope_exchange": payload.scope_exchange,
+            "options": payload.options.model_dump(by_alias=True),
+            "summary": summary,
+        }
+        schema = LLMReportOutput.model_json_schema()
+
+        last_result = None
+        provider_name: ProviderName = attempts[0][0]
+
+        for index, (attempt_provider, attempt_model) in enumerate(attempts):
+            provider_name = attempt_provider
+            selected_model = self._select_model_override(attempt_model, warnings)
+            provider = get_llm_provider(attempt_provider, self.settings, model=selected_model)
+            last_result = await provider.generate_report_json(payload=llm_payload, schema=schema)
+            if last_result.status == "success":
+                if index > 0:
+                    warnings.append(
+                        f"Đã fallback sang provider {attempt_provider} sau khi provider trước thất bại."
+                    )
+                return last_result, provider_name
+
+            if index < len(attempts) - 1:
+                warnings.append(
+                    f"Provider {attempt_provider} ({last_result.model}) không tạo được báo cáo; thử provider tiếp theo."
+                )
+
+        return last_result, provider_name
 
     def _select_model_override(self, requested_model: str | None, warnings: list[str]) -> str | None:
         if not requested_model:
