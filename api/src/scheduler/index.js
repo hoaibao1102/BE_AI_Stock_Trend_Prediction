@@ -1,7 +1,9 @@
 const alertChecker = require('./alert-checker.scheduler');
+const portfolioAnalysis = require('./portfolio-analysis.scheduler');
 
 const startAllSchedulers = () => {
   alertChecker.start();
+  portfolioAnalysis.start();
 };
 
 const stopAllSchedulers = () => {
